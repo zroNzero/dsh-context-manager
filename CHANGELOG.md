@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.8 — 2026-11-10
+
+### 面板契约与计费口径
+
+- `savings.json` 升级为快照契约（schemaVersion 3）：新增 `ledgerId`、`revision`，
+  消费方必须按 ledgerId **替换**而不是跨重启累加（面板曾出现 131 事件 / 377k 的累积虚高）。
+- 新增缓存感知成本估算 `estimatedCostTokens`：
+  schema 位于缓存前缀（价格 1/30），工具输出按未命中价 1，加权后才是可比较的账单近似。
+- `totalSavedTokens` 明确为「prompt 中少发的 token 数」，并在 `savings.md` 写明
+  它不是账单；fold 作为一次性上下文缩减单独展示。
+- 回归测试：`savings.ledger-cost-model`。
+
 ## v1.0.7 — 2026-11-10
 
 ### 修复：折叠记账虚高（面板数字不符预期）

@@ -71,6 +71,15 @@ flowchart LR
 `savedByAdmission / savedByExtraction / savedByDedup / savedByFold / savedBySchema`
 与 `savingsFile` 路径）。
 
+### 面板消费契约（重要）
+
+- `savings.json` 是**快照**，不是增量流。消费方每次必须**替换**显示值，禁止把多次读取累加。
+- 用 `ledgerId` 识别账本：插件每次 apply 会生成新 id；id 变化表示计数已重置。
+- 用 `revision` 去重同一账本的重复写盘。
+- `totalSavedTokens` 是「prompt 中少发的 token 数」，不是账单；
+  `estimatedCostTokens` 是缓存感知的估算（schema 按命中价 1/30，工具输出按未命中价 1）；
+  `contextReduction`（fold）是一次性上下文缩减，单独展示。
+
 ## 安装
 
 ```powershell

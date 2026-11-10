@@ -8,8 +8,14 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SavingsLedger = void 0;
+const node_crypto_1 = require("node:crypto");
 const MAX_EVENTS = 20;
+/** 与 CacheAnchor 同一套缓存经济学：命中价 1，未命中价 30。 */
+const CACHE_HIT_PRICE = 1;
+const CACHE_MISS_PRICE = 30;
 class SavingsLedger {
+    ledgerId = (0, node_crypto_1.randomUUID)();
+    revision = 0;
     startedAt = Date.now();
     updatedAt = Date.now();
     byModule = {
@@ -29,6 +35,7 @@ class SavingsLedger {
             return;
         this.byModule[module] += value;
         this.eventCount += 1;
+        this.revision += 1;
         this.updatedAt = Date.now();
         this.lastEvents.push({ ts: new Date().toISOString(), module, tokens: value, detail });
         if (this.lastEvents.length > MAX_EVENTS)
@@ -45,14 +52,21 @@ class SavingsLedger {
     }
     snapshot() {
         const byModule = { ...this.byModule };
+        const eventSavings = byModule.admission + byModule.extraction + byModule.dedup;
+        // schema 命中缓存前缀（价格 1/30），工具输出属于新 token（价格 1）。
+        const estimatedCostTokens = Math.round((byModule.schema * CACHE_HIT_PRICE) / CACHE_MISS_PRICE) + eventSavings;
         return {
+            schemaVersion: 3,
+            ledgerId: this.ledgerId,
+            revision: this.revision,
             startedAt: new Date(this.startedAt).toISOString(),
             updatedAt: new Date(this.updatedAt).toISOString(),
             totalSavedTokens: this.total,
             byModule,
             perRequestSavings: byModule.schema,
-            eventSavings: byModule.admission + byModule.extraction + byModule.dedup,
+            eventSavings,
             contextReduction: byModule.fold,
+            estimatedCostTokens,
             events: this.eventCount,
             folds: this.foldCount,
             rejectedByAnchor: this.rejected,
@@ -73,16 +87,19 @@ class SavingsLedger {
             '# Token Savings',
             '',
             `- updated: ${snapshot.updatedAt}`,
+            `- ledgerId: ${snapshot.ledgerId} (revision ${snapshot.revision})`,
             `- started: ${snapshot.startedAt}`,
-            `- total saved tokens: **${snapshot.totalSavedTokens}**`,
+            `- prompt tokens removed: **${snapshot.totalSavedTokens}**`,
             `- 按请求累计（schema）: ${snapshot.perRequestSavings}`,
             `- 单次事件（admission/extraction/dedup）: ${snapshot.eventSavings}`,
             `- 一次性上下文缩减（fold）: ${snapshot.contextReduction}`,
+            `- 缓存感知估算成本节省（miss-token 等价）: **${snapshot.estimatedCostTokens}**`,
             `- events: ${snapshot.events} | folds: ${snapshot.folds} | rejected by CacheAnchor: ${snapshot.rejectedByAnchor}`,
             '',
-            '> 口径说明：fold 是一次性上下文缩减（只记一次，后续请求持续受益但不重复累加）；',
-            '> schema 是每次请求都生效的累计节省；admission/extraction/dedup 是单次事件节省。',
-            '> 三者相加是「估算的 token 削减量」，不等同于账单差额。',
+            '> 口径说明：totalSavedTokens 是「prompt 中少发的 token 数」，不是账单。',
+            '> schema 位于缓存前缀（价格 1/30），extraction/admission/dedup 是新 token（价格 1），',
+            '> estimatedCostTokens 按此加权；fold 是一次性上下文缩减，单独展示。',
+            '> 消费方必须以 ledgerId 识别新账本：新 id 时必须「替换」而不是累加。',
             '',
             '## By module',
             '',

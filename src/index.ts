@@ -218,6 +218,10 @@ function buildStatusTool(getStatus: () => Record<string, unknown>) {
           perRequestSavings: { type: 'number' },
           eventSavings: { type: 'number' },
           contextReduction: { type: 'number' },
+          estimatedCostTokens: { type: 'number' },
+          schemaVersion: { type: 'number' },
+          ledgerId: { type: 'string' },
+          revision: { type: 'number' },
           savingsFile: { type: 'string' },
         },
         required: [
@@ -236,6 +240,10 @@ function buildStatusTool(getStatus: () => Record<string, unknown>) {
           'perRequestSavings',
           'eventSavings',
           'contextReduction',
+          'estimatedCostTokens',
+          'schemaVersion',
+          'ledgerId',
+          'revision',
           'savingsFile',
         ],
         additionalProperties: false,
@@ -326,6 +334,10 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         perRequestSavings: snapshot.perRequestSavings,
         eventSavings: snapshot.eventSavings,
         contextReduction: snapshot.contextReduction,
+        estimatedCostTokens: snapshot.estimatedCostTokens,
+        schemaVersion: snapshot.schemaVersion,
+        ledgerId: snapshot.ledgerId,
+        revision: snapshot.revision,
         savingsFile: savingsMarkdown,
       }
     }))

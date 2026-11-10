@@ -11,6 +11,7 @@ import { runCacheAnchorSelfTest } from './cacheAnchor'
 import { runExtraction } from './modules/extraction'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
+import { SavingsLedger } from './modules/savings-ledger'
 import { logEvent } from './log'
 
 interface Outcome {
@@ -200,6 +201,24 @@ check('memory.savings-accounting', () => {
   assert(plan.tokensBefore <= 1200, `fold tokensBefore must count candidates only, got ${plan.tokensBefore}`)
   assert(plan.tokensSaved <= 1200, `fold tokensSaved must count candidates only, got ${plan.tokensSaved}`)
   assert((plan.contextTokens ?? 0) > 10000, `contextTokens should reflect the full context, got ${plan.contextTokens}`)
+})
+
+// ---------------------------------------------------------------------------
+// 7) 节省面板契约：ledgerId / revision / 缓存感知成本
+// ---------------------------------------------------------------------------
+
+check('savings.ledger-cost-model', () => {
+  const ledger = new SavingsLedger()
+  ledger.record('schema', 2704, 'schema')
+  ledger.record('extraction', 100, 'output')
+  const snapshot = ledger.snapshot()
+
+  assert(snapshot.schemaVersion === 3, `schemaVersion=${snapshot.schemaVersion}`)
+  assert(snapshot.ledgerId.length > 0, 'ledgerId required')
+  assert(snapshot.revision === 2, `revision=${snapshot.revision}`)
+  assert(snapshot.totalSavedTokens === 2804, `prompt tokens removed=${snapshot.totalSavedTokens}`)
+  assert(snapshot.estimatedCostTokens === 190, `cost-aware estimate=${snapshot.estimatedCostTokens} (90 + 100)`)
+  assert(snapshot.contextReduction === 0, 'fold must stay separate from cost estimate')
 })
 
 // ---------------------------------------------------------------------------

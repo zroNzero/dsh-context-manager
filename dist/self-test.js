@@ -15,6 +15,7 @@ const cacheAnchor_1 = require("./cacheAnchor");
 const extraction_1 = require("./modules/extraction");
 const memory_1 = require("./modules/memory");
 const host_sim_1 = require("./host-sim");
+const savings_ledger_1 = require("./modules/savings-ledger");
 const log_1 = require("./log");
 const outcomes = [];
 function check(name, fn) {
@@ -169,6 +170,21 @@ check('memory.savings-accounting', () => {
     assert(plan.tokensBefore <= 1200, `fold tokensBefore must count candidates only, got ${plan.tokensBefore}`);
     assert(plan.tokensSaved <= 1200, `fold tokensSaved must count candidates only, got ${plan.tokensSaved}`);
     assert((plan.contextTokens ?? 0) > 10000, `contextTokens should reflect the full context, got ${plan.contextTokens}`);
+});
+// ---------------------------------------------------------------------------
+// 7) 节省面板契约：ledgerId / revision / 缓存感知成本
+// ---------------------------------------------------------------------------
+check('savings.ledger-cost-model', () => {
+    const ledger = new savings_ledger_1.SavingsLedger();
+    ledger.record('schema', 2704, 'schema');
+    ledger.record('extraction', 100, 'output');
+    const snapshot = ledger.snapshot();
+    assert(snapshot.schemaVersion === 3, `schemaVersion=${snapshot.schemaVersion}`);
+    assert(snapshot.ledgerId.length > 0, 'ledgerId required');
+    assert(snapshot.revision === 2, `revision=${snapshot.revision}`);
+    assert(snapshot.totalSavedTokens === 2804, `prompt tokens removed=${snapshot.totalSavedTokens}`);
+    assert(snapshot.estimatedCostTokens === 190, `cost-aware estimate=${snapshot.estimatedCostTokens} (90 + 100)`);
+    assert(snapshot.contextReduction === 0, 'fold must stay separate from cost estimate');
 });
 // ---------------------------------------------------------------------------
 // 汇总
