@@ -61,7 +61,7 @@ export const Config = z.object({
   compressionBudgetMs: z.number().int().positive().default(50),
   /** 去重总线容量。 */
   dedupCapacity: z.number().int().positive().default(256),
-})
+}).prefault({})
 
 export type CostKillerConfig = z.infer<typeof Config>
 

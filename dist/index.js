@@ -87,7 +87,7 @@ exports.Config = zod_1.z.object({
     compressionBudgetMs: zod_1.z.number().int().positive().default(50),
     /** 去重总线容量。 */
     dedupCapacity: zod_1.z.number().int().positive().default(256),
-});
+}).prefault({});
 const POLICY_TEXT = [
     'You are running with CostKillerOrchestrator active.',
     'Large tool outputs are replaced by a [ADMISSION] receipt holding the absolute spill path: use the read tool instead of re-running the command.',

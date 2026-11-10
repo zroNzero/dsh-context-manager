@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.2 — 2026-11-10
+
+### 修复
+
+- **无 config 时激活失败**：DSH 用插件导出的 `Config` 校验条目配置，缺省条目传入
+  `undefined`，zod object 直接报 `expected object, received undefined`。
+  `Config` 改为 `.prefault({})`，未写 `config` 也能通过校验并套用全部默认值。
+- 本地 profile 安装目录同步更新 `dist`。
+
 ## v1.0.1 — 2026-11-10
 
 ### 修复

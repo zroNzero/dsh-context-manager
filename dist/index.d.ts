@@ -14,7 +14,7 @@ import { z } from 'zod';
 import type { Context } from '@deepseek-ai/cordis';
 export declare const name = "cost-killer-orchestrator";
 export declare const inject: string[];
-export declare const Config: z.ZodObject<{
+export declare const Config: z.ZodPrefault<z.ZodObject<{
     maxInputTokens: z.ZodDefault<z.ZodNumber>;
     maxOutputTokens: z.ZodDefault<z.ZodNumber>;
     foldAtRatio: z.ZodDefault<z.ZodNumber>;
@@ -28,6 +28,6 @@ export declare const Config: z.ZodObject<{
     spillTtlHours: z.ZodDefault<z.ZodNumber>;
     compressionBudgetMs: z.ZodDefault<z.ZodNumber>;
     dedupCapacity: z.ZodDefault<z.ZodNumber>;
-}, z.core.$strip>;
+}, z.core.$strip>>;
 export type CostKillerConfig = z.infer<typeof Config>;
 export declare function apply(ctx: Context, rawConfig?: Partial<CostKillerConfig>): () => void;
