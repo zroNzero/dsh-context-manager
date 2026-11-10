@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.6 — 2026-11-10
+
+### 清理
+
+- 移除设计输入文档 `structure.txt` / `weapons.txt`（不再随仓库发布）。
+- 运行时产物（`debug.log`、`savings.*`、`spill/`）保持被 `.gitignore` 排除。
+
 ## v1.0.5 — 2026-11-10
 
 ### 变更
