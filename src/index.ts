@@ -47,13 +47,13 @@ export const Config = z.object({
   /** 最近 N 条消息永不折叠。 */
   retainRecent: z.number().int().nonnegative().default(8),
   /** 单次折叠至少节省多少 token 才提交。 */
-  minSaveTokens: z.number().int().nonnegative().default(200),
+  minSaveTokens: z.number().int().nonnegative().default(100),
   /** 落盘目录（相对进程工作目录）。 */
   spillDir: z.string().default('./spill'),
   /** 单条工具输出超过该 token 数即准入落盘。 */
-  admissionTokens: z.number().int().positive().default(4000),
+  admissionTokens: z.number().int().positive().default(1500),
   /** 单条工具输出经萃取后的目标 token 上限。 */
-  extractionTokens: z.number().int().positive().default(2500),
+  extractionTokens: z.number().int().positive().default(800),
   /** 是否真正发起本地路由请求（决策与日志始终开启）。 */
   localRouting: z.boolean().default(false),
   /** spill 目录保留的最大文件数。 */
@@ -311,6 +311,18 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
   // 会话 -> 工作区映射：schema 压缩发生在 llm 层，只能靠 sessionId 反查。
   const sessionWorkspaces = new Map<string, WorkspaceRef>()
+  const liveSession = (sessionId: string, fallback: any): any => {
+    try {
+      const store = (services as any).sessions
+      if (store && typeof store.get === 'function') {
+        const fromStore = store.get(sessionId)
+        if (fromStore) return fromStore
+      }
+    } catch {
+      /* 服务不可用时回退到 hook 传入的实例 */
+    }
+    return fallback
+  }
   const workspaceFor = (session: any, agent?: any): WorkspaceRef =>
     workspaceRefFromSession(session, agent) ?? workspaceRef('(unknown)')
 
@@ -419,7 +431,9 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       const content = decision.content ?? result?.content
       const text = flattenPlainText(content)
       if (text === undefined) return decision
-      const workspace = workspaceFor(exec?.agent?.session, exec?.agent)
+      const execSession = exec?.agent?.session
+      const execSessionId = String(execSession?.id ?? exec?.agent?.sessionId ?? '')
+      const workspace = workspaceFor(execSessionId ? liveSession(execSessionId, execSession) : execSession, exec?.agent)
 
       // 去重总线：同一输出第二次出现时只留指针（最常见的是重复跑测试/构建/目录列表）。
       const dedupKeyValue = dedupeKey(text)
@@ -528,14 +542,17 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       if (entries.length === 0) return downstream
 
       const sessionId = String(session.id ?? 'unknown')
-      const workspace = workspaceFor(session, payload?.agent)
+      const live = liveSession(sessionId, session)
+      const workspace = workspaceFor(live, payload?.agent)
       if (!sessionWorkspaces.has(sessionId)) {
         sessionWorkspaces.set(sessionId, workspace)
-        logEvent('info', 'workspace.resolved', {
+        logEvent('info', workspace.path === '(unknown)' ? 'workspace.unresolved' : 'workspace.resolved', {
           sessionId,
           workspace: workspace.path,
           workspaceId: workspace.id,
           label: workspace.label,
+          hookCwd: String((session as any)?.cwd ?? ''),
+          storeCwd: String((live as any)?.header?.cwd ?? ''),
         })
       }
       const state = stateFor(sessionId)

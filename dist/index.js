@@ -73,13 +73,13 @@ exports.Config = zod_1.z.object({
     /** 最近 N 条消息永不折叠。 */
     retainRecent: zod_1.z.number().int().nonnegative().default(8),
     /** 单次折叠至少节省多少 token 才提交。 */
-    minSaveTokens: zod_1.z.number().int().nonnegative().default(200),
+    minSaveTokens: zod_1.z.number().int().nonnegative().default(100),
     /** 落盘目录（相对进程工作目录）。 */
     spillDir: zod_1.z.string().default('./spill'),
     /** 单条工具输出超过该 token 数即准入落盘。 */
-    admissionTokens: zod_1.z.number().int().positive().default(4000),
+    admissionTokens: zod_1.z.number().int().positive().default(1500),
     /** 单条工具输出经萃取后的目标 token 上限。 */
-    extractionTokens: zod_1.z.number().int().positive().default(2500),
+    extractionTokens: zod_1.z.number().int().positive().default(800),
     /** 是否真正发起本地路由请求（决策与日志始终开启）。 */
     localRouting: zod_1.z.boolean().default(false),
     /** spill 目录保留的最大文件数。 */
@@ -325,6 +325,20 @@ function apply(ctx, rawConfig = {}) {
     };
     // 会话 -> 工作区映射：schema 压缩发生在 llm 层，只能靠 sessionId 反查。
     const sessionWorkspaces = new Map();
+    const liveSession = (sessionId, fallback) => {
+        try {
+            const store = services.sessions;
+            if (store && typeof store.get === 'function') {
+                const fromStore = store.get(sessionId);
+                if (fromStore)
+                    return fromStore;
+            }
+        }
+        catch {
+            /* 服务不可用时回退到 hook 传入的实例 */
+        }
+        return fallback;
+    };
     const workspaceFor = (session, agent) => (0, workspace_1.workspaceRefFromSession)(session, agent) ?? (0, workspace_1.workspaceRef)('(unknown)');
     (0, log_1.logEvent)('info', 'apply.start', { plugin: exports.name, config });
     try {
@@ -438,7 +452,9 @@ function apply(ctx, rawConfig = {}) {
             const text = flattenPlainText(content);
             if (text === undefined)
                 return decision;
-            const workspace = workspaceFor(exec?.agent?.session, exec?.agent);
+            const execSession = exec?.agent?.session;
+            const execSessionId = String(execSession?.id ?? exec?.agent?.sessionId ?? '');
+            const workspace = workspaceFor(execSessionId ? liveSession(execSessionId, execSession) : execSession, exec?.agent);
             // 去重总线：同一输出第二次出现时只留指针（最常见的是重复跑测试/构建/目录列表）。
             const dedupKeyValue = (0, dedup_bus_1.dedupeKey)(text);
             const dedupHit = dedup.hit(dedupKeyValue);
@@ -543,14 +559,17 @@ function apply(ctx, rawConfig = {}) {
             if (entries.length === 0)
                 return downstream;
             const sessionId = String(session.id ?? 'unknown');
-            const workspace = workspaceFor(session, payload?.agent);
+            const live = liveSession(sessionId, session);
+            const workspace = workspaceFor(live, payload?.agent);
             if (!sessionWorkspaces.has(sessionId)) {
                 sessionWorkspaces.set(sessionId, workspace);
-                (0, log_1.logEvent)('info', 'workspace.resolved', {
+                (0, log_1.logEvent)('info', workspace.path === '(unknown)' ? 'workspace.unresolved' : 'workspace.resolved', {
                     sessionId,
                     workspace: workspace.path,
                     workspaceId: workspace.id,
                     label: workspace.label,
+                    hookCwd: String(session?.cwd ?? ''),
+                    storeCwd: String(live?.header?.cwd ?? ''),
                 });
             }
             const state = stateFor(sessionId);

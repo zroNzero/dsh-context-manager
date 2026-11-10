@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.0.11 — 2026-11-10
+
+### 工作区解析与压缩触发
+
+- **workspace 解析改走权威路径**：`ctx.sessions.get(sessionId)?.header?.cwd`（SessionStore），
+  不再依赖 hook 传入对象上的 cwd 字段；解析失败时写 `workspace.unresolved` 诊断日志
+  （含 hook cwd / store cwd / sessionId）。
+- **真实流量下压缩不触发**：线上工具输出多在 1.5k tokens，而原默认
+  `extractionTokens=2500 / admissionTokens=4000`，导致只有 schema 在省。
+  默认值调整为 `extractionTokens=800`、`admissionTokens=1500`、`minSaveTokens=100`，
+  让 1–2.5k 的输出也能进入结构化压缩 / 落盘指针。
+
+## v1.0.10 — 2026-11-10
+
+### 工作区解析诊断
+
+- 扩充会话 cwd 的候选字段（`header/meta/info/options` 等），并记录
+  `workspace.resolved` / `workspace.unresolved`，便于在真实宿主上定位解析失败。
+
 ## v1.0.9 — 2026-11-10
 
 ### 面板契约 v4：按工作区分账 + 比例分母
