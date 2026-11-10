@@ -185,11 +185,12 @@ function planMemoryFold(entries, options = {}) {
         lines.push(`[错误锚点] ${errors.join(' / ')}`);
     lines.push('[原始内容已可从落盘文件恢复；如需细节请使用 read 工具。]');
     let summary = lines.join('\n');
-    // 质量校验：状态卡里的每个硬约束必须出现在摘要中；缺失则补回，绝不静默丢约束。
+    // 质量校验：状态卡里的每个硬约束必须出现在最终摘要中；缺失则补回，绝不静默丢约束。
     const missingConstraints = index.constraints.filter((value) => !summary.includes(value.replace(/…$/, '')));
     if (missingConstraints.length > 0)
         summary += `\n[约束] ${missingConstraints.join(' | ')}`;
-    const qualityPass = missingConstraints.length === 0;
+    const backfilled = missingConstraints.length;
+    const qualityPass = index.constraints.every((value) => summary.includes(value.replace(/…$/, '')));
     const tokensAfter = estimate(summary);
     const tokensSaved = tokensBefore - tokensAfter;
     if (tokensSaved < minSaveTokens) {
@@ -215,6 +216,7 @@ function planMemoryFold(entries, options = {}) {
         cotSavedTokens: Math.max(0, Math.ceil((cotCharsBefore - cotCharsAfter) / 4)),
         indexIncluded: indexBlock.length > 0,
         qualityPass,
+        backfilled,
         patchId: patch.patchId,
     });
     return {

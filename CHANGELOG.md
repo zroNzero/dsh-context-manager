@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.0.3 — 2026-11-10
+
+### 修复
+
+- **Schema 压缩在真实 DSH 中静默失效**：插件 apply 早于 `llm` 服务注册，`ctx.get('llm')`
+  返回 undefined，日志只留 `schema.unavailable`。改为延迟安装 + 重试（500ms × 20），
+  成功后记录 `schema.installed`，失败才记录 `schema.unavailable`。
+- `qualityPass` 语义修正：现在表示“最终摘要包含全部硬约束”（缺失会回填并记录 `backfilled`），
+  不再把“需要回填”误报为失败。
+- 卸载时清理重试定时器，避免悬挂 timer。
+
 ## v1.0.2 — 2026-11-10
 
 ### 修复
