@@ -1,0 +1,41 @@
+/**
+ * ExtractionModule —— 多引擎萃取（v3.4 审计修订版）。
+ *
+ * 顺序：核心约束（永不压缩）→ 代码结构骨架化 → JSON 压缩 → 分节压缩 → 头尾截断。
+ *
+ * Fail-Closed 三条硬规则：
+ * 1. CORE_CONSTRAINTS 标记不闭合 → 返回原文本；
+ * 2. 代码花括号不配对 / 结构渲染失败 / 声明名丢失 → 返回原文本；
+ * 3. 抽取后任一约束值丢失 → 返回原文本。
+ * 返回 safe=false 时，调用方（index.ts）必须使用 admitted.text（原文/收据），不得使用本模块输出。
+ */
+export type ExtractionMode = 'none' | 'ast' | 'json' | 'section' | 'index' | 'head-tail';
+export interface ExtractionResult {
+    text: string;
+    constraints: string;
+    safe: boolean;
+    mode: ExtractionMode;
+    tokensBefore: number;
+    tokensAfter: number;
+    tokensSaved: number;
+    reason?: string;
+    /** 是否因时间预算/体量而退化到快速路径。 */
+    degraded?: boolean;
+    /** 本次萃取耗时（毫秒），用于延迟审计。 */
+    elapsedMs?: number;
+}
+/** 提取不可压缩约束块；标记不闭合时返回 null（调用方 Fail-Closed）。 */
+export declare function extractConstraints(text: string): string | null;
+export declare function looksLikeCode(text: string): boolean;
+/** 全文花括号是否配对（字符串/注释感知），不配对即视为不可解析。 */
+export declare function isBalancedCode(text: string): boolean;
+/**
+ * 结构化骨架化：保留 import / 类名 / 方法签名 / 注释，函数体与方法体折成 `{ ... }`。
+ * 返回 null 表示「不可解析」——调用方必须 Fail-Closed 使用原文本。
+ */
+export declare function skeletonize(text: string): string | null;
+export declare function runExtraction(input: {
+    text: string;
+    maxTokens: number;
+    budgetMs?: number;
+}): ExtractionResult;

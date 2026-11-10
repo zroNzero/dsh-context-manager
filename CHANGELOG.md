@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.1 — 2026-11-10
+
+### 修复
+
+- **GitHub 安装缺 `dist/`**：`dist/` 曾被 `.gitignore` 排除，`pnpm install github:...` 只得到
+  `cordis.patch.yml` 与元数据，DSH 报 `Cannot find package '...dist/index.js'`。
+  现在 `dist/` 随仓库发布，GitHub 安装无需本地构建即可加载。
+- 安装后自检：`dist/index.js` 可被 ESM `import()` 解析出 `name / inject / Config / apply`。
+
 ## v1.0.0 — 2026-11-10
 
 首个生产版本（CostKillerOrchestrator）。

@@ -1,0 +1,235 @@
+"use strict";
+/**
+ * MemoryModule —— 计划感知折叠 + 历史 CoT 蒸馏（v3.5）。
+ *
+ * 两刀：
+ * 1. CoT Distill：历史消息里的 <thought>/<thinking>/[思考] 块被剪成一行
+ *    `[决策: ...]` 状态结论，冗长推理从上下文中物理移除；
+ * 2. DAG 折叠：连续的中段 ATTEMPT/FAILURE 折叠为一条摘要 Patch。
+ *
+ * 永远不动：全部 user 需求（REQUIREMENT）、最近 retainRecent 条、最后一条 assistant 结论。
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.distillThoughts = distillThoughts;
+exports.planMemoryFold = planMemoryFold;
+const contracts_1 = require("../contracts");
+const log_1 = require("../log");
+const context_index_1 = require("./context-index");
+const FAILURE_RE = /(?:^|\s)(?:Error:|Exception:|Traceback\b|FAILED\b|panic!|AssertionError|失败|报错)|\[exit code:\s*(?!0\b)-?\d+\]/i;
+const DECISION_RE = /(?:决定|结论|采用|改用|方案|修复|should use|decided|decision|approach)/i;
+const CONSTRAINT_RE = /(?:[A-Za-z]:\\[^\s"']+|TODO:|FIXME:|[0-9a-f]{8}-[0-9a-f]{4}-)/i;
+const THOUGHT_RE = /<(thought|thinking)>([\s\S]*?)<\/\1>|\[思考\]([\s\S]*?)\[\/思考\]/gi;
+function estimate(text) {
+    return Math.ceil(Array.from(text).length / 4);
+}
+function preview(text, limit) {
+    const compact = text.replace(/\s+/g, ' ').trim();
+    if (compact.length === 0)
+        return '(空)';
+    const points = Array.from(compact);
+    return points.length > limit ? `${points.slice(0, limit).join('')}…` : compact;
+}
+function pick(texts, pattern, limit) {
+    const out = [];
+    const seen = new Set();
+    for (const text of texts) {
+        for (const line of text.split(/\r?\n/)) {
+            const trimmed = line.replace(/\s+/g, ' ').trim();
+            if (trimmed.length < 6 || trimmed.length > 200)
+                continue;
+            if (!pattern.test(trimmed))
+                continue;
+            const key = trimmed.toLowerCase();
+            if (seen.has(key))
+                continue;
+            seen.add(key);
+            out.push(Array.from(trimmed).slice(0, 110).join(''));
+            if (out.length >= limit)
+                return out;
+        }
+    }
+    return out;
+}
+/**
+ * 把一段思考压成一行状态结论：优先保留决策/结论句，否则取首个有效片段。
+ * 输出永远不含原始 <thought> 标签。
+ */
+function distillThoughtBlock(raw) {
+    const compact = raw.replace(/\s+/g, ' ').trim();
+    if (compact.length === 0)
+        return '[决策: (空思考)]';
+    const sentences = compact.split(/(?<=[。！？.!?])\s+/).filter((part) => part.length > 0);
+    const decision = sentences.find((part) => DECISION_RE.test(part));
+    const source = decision ?? sentences[0] ?? compact;
+    return `[决策: ${Array.from(source).slice(0, 70).join('')}]`;
+}
+/** 蒸馏单条文本里的全部思考块；返回文本与真实字符/片段统计。 */
+function distillThoughts(text) {
+    if (typeof text !== 'string' || text.length === 0) {
+        return { text, segments: 0, removedChars: 0, keptChars: 0 };
+    }
+    let segments = 0;
+    let removedChars = 0;
+    let keptChars = 0;
+    const next = text.replace(THOUGHT_RE, (_match, _tag, thought, square) => {
+        const body = String(thought ?? square ?? '');
+        segments += 1;
+        removedChars += Array.from(body).length;
+        const distilled = distillThoughtBlock(body);
+        keptChars += Array.from(distilled).length;
+        return distilled;
+    });
+    return { text: next, segments, removedChars, keptChars };
+}
+function planMemoryFold(entries, options = {}) {
+    const retainRecent = options.retainRecent ?? 8;
+    const minSaveTokens = options.minSaveTokens ?? 200;
+    const empty = {
+        patch: null,
+        foldedSeqs: [],
+        foldedMessages: 0,
+        tokensBefore: 0,
+        tokensAfter: 0,
+        tokensSaved: 0,
+        summary: '',
+        cotSegments: 0,
+        cotCharsBefore: 0,
+        cotCharsAfter: 0,
+        cotSavedTokens: 0,
+    };
+    if (entries.length === 0)
+        return empty;
+    const tokensBefore = entries.reduce((sum, entry) => sum + estimate(entry.text), 0);
+    let lastAssistant = -1;
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+        if (entries[index].role === 'assistant') {
+            lastAssistant = index;
+            break;
+        }
+    }
+    // 候选：非 user、不在保留窗口、不是最后结论。
+    const flags = entries.map((entry, index) => {
+        if (entry.role === 'user')
+            return false;
+        if (index >= entries.length - retainRecent)
+            return false;
+        if (index === lastAssistant)
+            return false;
+        if (entry.text.trim().length === 0)
+            return false;
+        return true;
+    });
+    // 只取最长的一段连续候选：surface replacement 必须落在连续节点区间上。
+    let bestStart = -1;
+    let bestLength = 0;
+    let runStart = -1;
+    for (let index = 0; index <= entries.length; index += 1) {
+        const isCandidate = index < entries.length && flags[index] === true;
+        if (isCandidate) {
+            if (runStart < 0)
+                runStart = index;
+            continue;
+        }
+        if (runStart >= 0) {
+            const length = index - runStart;
+            if (length > bestLength) {
+                bestLength = length;
+                bestStart = runStart;
+            }
+            runStart = -1;
+        }
+    }
+    const candidates = bestStart >= 0 ? entries.slice(bestStart, bestStart + bestLength) : [];
+    if (candidates.length === 0)
+        return { ...empty, tokensBefore, tokensAfter: tokensBefore };
+    // CoT 蒸馏：先剪思考块，再做摘要。
+    let cotSegments = 0;
+    let cotCharsBefore = 0;
+    let cotCharsAfter = 0;
+    const distilled = candidates.map((entry) => {
+        const result = distillThoughts(entry.text);
+        cotSegments += result.segments;
+        cotCharsBefore += result.removedChars;
+        cotCharsAfter += result.keptChars;
+        return { ...entry, text: result.text };
+    });
+    if (cotSegments > 0) {
+        (0, log_1.logEvent)('info', 'memory.cot_distilled', {
+            module: 'Memory',
+            segments: cotSegments,
+            charsBefore: cotCharsBefore,
+            charsAfter: cotCharsAfter,
+            savedTokens: Math.max(0, Math.ceil((cotCharsBefore - cotCharsAfter) / 4)),
+        });
+    }
+    const decisions = pick(distilled.map((entry) => entry.text), DECISION_RE, 3);
+    const constraints = pick(distilled.map((entry) => entry.text), CONSTRAINT_RE, 4);
+    const errors = pick(distilled.filter((entry) => entry.isError === true || FAILURE_RE.test(entry.text)).map((entry) => entry.text), FAILURE_RE, 3);
+    // “高智商”核心：把候选历史压成结构化任务状态卡，而不是裸摘要。
+    const index = (0, context_index_1.buildContextIndex)(entries, 3);
+    const indexBlock = (0, context_index_1.isEmptyIndex)(index) ? '' : (0, context_index_1.renderContextIndex)(index);
+    const lines = [];
+    if (indexBlock) {
+        lines.push(indexBlock);
+        lines.push('');
+    }
+    lines.push(`[MEMORY] 已折叠 ${candidates.length} 条中间消息（约 ${tokensBefore} tokens 的历史尝试）。`);
+    if (cotSegments > 0) {
+        lines.push(`[CoT] 已蒸馏 ${cotSegments} 段思考（${cotCharsBefore} → ${cotCharsAfter} 字符）。`);
+    }
+    if (decisions.length > 0)
+        lines.push(`[决策] ${decisions.join(' / ')}`);
+    if (constraints.length > 0)
+        lines.push(`[约束] ${constraints.join(' / ')}`);
+    if (errors.length > 0)
+        lines.push(`[错误锚点] ${errors.join(' / ')}`);
+    lines.push('[原始内容已可从落盘文件恢复；如需细节请使用 read 工具。]');
+    let summary = lines.join('\n');
+    // 质量校验：状态卡里的每个硬约束必须出现在摘要中；缺失则补回，绝不静默丢约束。
+    const missingConstraints = index.constraints.filter((value) => !summary.includes(value.replace(/…$/, '')));
+    if (missingConstraints.length > 0)
+        summary += `\n[约束] ${missingConstraints.join(' | ')}`;
+    const qualityPass = missingConstraints.length === 0;
+    const tokensAfter = estimate(summary);
+    const tokensSaved = tokensBefore - tokensAfter;
+    if (tokensSaved < minSaveTokens) {
+        return { ...empty, tokensBefore, tokensAfter: tokensBefore, summary, cotSegments, cotCharsBefore, cotCharsAfter };
+    }
+    const first = candidates[0];
+    const patch = {
+        patchId: `mem-${(0, contracts_1.hashText)(summary).slice(0, 12)}`,
+        targetZone: 'dynamic_zone',
+        diff: { op: 'fold', payload: summary, anchor: String(first.seq) },
+        originModule: 'Memory',
+        tokensSaved,
+    };
+    (0, log_1.logEvent)('info', 'memory.planned', {
+        module: 'Memory',
+        folded: candidates.length,
+        tokensBefore,
+        tokensAfter,
+        tokensSaved,
+        cotSegments,
+        cotCharsBefore,
+        cotCharsAfter,
+        cotSavedTokens: Math.max(0, Math.ceil((cotCharsBefore - cotCharsAfter) / 4)),
+        indexIncluded: indexBlock.length > 0,
+        qualityPass,
+        patchId: patch.patchId,
+    });
+    return {
+        patch,
+        foldedSeqs: candidates.map((entry) => entry.seq),
+        foldedMessages: candidates.length,
+        tokensBefore,
+        tokensAfter,
+        tokensSaved,
+        summary,
+        cotSegments,
+        cotCharsBefore,
+        cotCharsAfter,
+        cotSavedTokens: Math.max(0, Math.ceil((cotCharsBefore - cotCharsAfter) / 4)),
+        indexIncluded: indexBlock.length > 0,
+        qualityPass,
+    };
+}
