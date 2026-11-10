@@ -1,0 +1,48 @@
+==================== CostKillerOrchestrator 理论武器库 ====================
+
+【一、缓存经济学与请求流对齐】
+- Cache Stampede: 压缩导致序列化偏离前缀，命中率跌至10.1%；修复=压缩产物token序列与正常前缀字节级一致。
+- Prefix Cache Discipline: Agent负载中前缀缓存命中价与未命中价差额达1/30。Pi Harness通过极简工具集实现99.93%命中率。
+- Cache-Aware Request Planning: 贪心前缀聚类调度，对齐TTL窗口，无损实现60%账单削减。
+- TTL Keepalive Economics: 按Provider TTL约4分钟间隔重放前缀，恢复后成本降低12.5倍。
+- Helios: Agent声明上下文生命周期，避免僵尸KV占据容量，token成本降16-37%。
+- RR-Evict: 避免LRU集中攻击私有历史。轮转逐出各Agent尾部块，P99 TTFT降低75.4%。
+- TokenPilot: 全局摄入感知压缩在入口稳定前缀，连续模式下成本降幅高达87%。
+
+【二、准入、指针化与传输协议】
+- MCP Tool Tax: 无状态Schema注入每轮消耗10k-60k tokens。
+- Tool Attention: 意图模式重叠评分门控，仅对top-k工具提升完整JSON Schema。工具token从47.3k降至2.4k。
+- Progressive Disclosure: 上下文只留轻量catalog，Schema按需加载。
+- PTC: 将wire协议收拢为run_code，工具调用变沙箱代码执行。输入Token降77%。
+- DTOC: 工具输出全量存外部，活动上下文只放可逆占位符。
+- Squeez: 微调2B小模型做工具输出剪枝，移除92%token。
+
+【三、上下文压缩与轨迹管理】
+- Compression Rebound: 1/3 Token的压缩策略可能导致端到端执行时间变慢20-80%，因信息缺失导致模型增加交互轮次。
+- Slipstream: 压缩器与Agent并行执行，用judge验证候选摘要保留前向意图。准确率提升8.8%。
+- AgentDiet: 外部反射模块只查局部窗口，移除无用过期信息。总成本降21.1-35.9%。
+- CWL: 标注依赖链接的episode，按优先级确定性逐出已完成节点。
+- MEMOIR: 压缩前测试答案证据是否保留，从源头避免需要回滚的折叠。
+- CoT Distillation: 历史长篇思考压缩为单行状态结论。
+- CompressAgent Benchmark: 35%预算下，分节压缩成功率47.0%，通用改写仅19.9%。必须三维标定。
+- 机械抽取 vs LLM摘要: 在重复细节保留上，机械抽取保留79.1%，LLM摘要仅保留16.0%。
+
+【四、多智能体KV缓存共享与安全治理】
+- PolyKV: 将共享文档压缩一次注入N个并发Agent。KV量化为int8和TurboQuant 3-bit。
+- RelayCaching: 复用前序Agent的解码KV缓存，仅重算少量前缀偏差。
+- Judge Dense Prefill (硬约束): Judge角色复用KV会削弱跨候选注意力。Judge必须强制dense prefill。
+- ARCBench: 规则保留在摘要中不等于有效。Agent可能将规则解释为许可，违规率升至26.8%。必须做行为探针。
+- Constraint Pinning: 治理约束及其运行时状态依赖双位置注入，不可压缩。
+- Governed Compression: 无法保证安全跨度完整时，Fail-Closed拒绝压缩。
+
+【五、路由、投机与社区参考】
+- Local-First Router: 本地Ollama执行体到云端兜底的三层路由。
+- SpecAgent: 弱模型草拟工具轨迹，强模型一次prefill审阅。强模型仅生成36-50%token。
+- STEER: 利用小模型生成前logits置信度，仅必要时调用大模型。FLOPs减少48%。
+- AIMS: 83.4%子任务卸载到本地SLM，精度与纯云端持平。
+- dsh-clear-tool-results / dsh-funnel: 工具结果准入过滤落盘。
+- dsh-context-compression: STRONG/SKELETON/WEAK分层保留。
+- dsh-context-lens: 语义AST骨架化，日志冷凝。
+- dsh-reasoning-distill: 思考蒸馏。
+- dsh-live-compact / compaction-cacheaware: 缓存感知的稳定折叠。
+- dsh-token-optimizer: 分层压缩+MCP懒加载+outputLadder。

@@ -1,0 +1,509 @@
+/**
+ * CostKillerOrchestrator 入口。
+ *
+ * 钩子编排：
+ * - tools/post-execute: Admission（超大输出落盘）→ Extraction（约束 + 骨架/JSON/分节）
+ * - agent/pre-step: Memory 折叠 → CacheAnchor 净收益门控 → 通过才提交 surface 补丁
+ *
+ * 铁律：
+ * - 所有状态经 logEvent 写 ./debug.log，全工程无 console.log。
+ * - 模块只产出 Patch；payload 永不被原地修改。
+ * - 任何异常都 Fail-Open 到原行为，绝不阻断对话。
+ */
+
+import { z } from 'zod'
+import type { Context } from '@deepseek-ai/cordis'
+import * as path from 'node:path'
+import {
+  applyPatch,
+  createEnvelope,
+  estimateTokens,
+  hashText,
+  type ContextEnvelope,
+  type Patch,
+} from './contracts'
+import { gatePatch } from './cacheAnchor'
+import { logEvent } from './log'
+import { runAdmission } from './modules/admission'
+import { runExtraction } from './modules/extraction'
+import { planMemoryFold, type MemoryEntry } from './modules/memory'
+import { hasCrossFileDependency, RoutingModule } from './modules/routing'
+import { collectGarbage } from './modules/spill-gc'
+import { installSchemaCompressor } from './modules/schema-index'
+import { CompressionBreaker } from './modules/breaker'
+import { DedupBus, dedupeKey } from './modules/dedup-bus'
+
+export const name = 'cost-killer-orchestrator'
+export const inject = ['systemPrompt', 'tools', 'sessions', 'agents']
+
+export const Config = z.object({
+  maxInputTokens: z.number().int().positive().default(100000),
+  maxOutputTokens: z.number().int().positive().default(16000),
+  /** 上下文占用超过 maxInputTokens * foldAtRatio 才允许折叠。 */
+  foldAtRatio: z.number().gt(0).lte(1).default(0.6),
+  /** 最近 N 条消息永不折叠。 */
+  retainRecent: z.number().int().nonnegative().default(8),
+  /** 单次折叠至少节省多少 token 才提交。 */
+  minSaveTokens: z.number().int().nonnegative().default(200),
+  /** 落盘目录（相对进程工作目录）。 */
+  spillDir: z.string().default('./spill'),
+  /** 单条工具输出超过该 token 数即准入落盘。 */
+  admissionTokens: z.number().int().positive().default(4000),
+  /** 单条工具输出经萃取后的目标 token 上限。 */
+  extractionTokens: z.number().int().positive().default(2500),
+  /** 是否真正发起本地路由请求（决策与日志始终开启）。 */
+  localRouting: z.boolean().default(false),
+  /** spill 目录保留的最大文件数。 */
+  spillMaxFiles: z.number().int().positive().default(50),
+  /** spill 文件 TTL（小时）。 */
+  spillTtlHours: z.number().positive().default(24),
+  /** 单次萃取的时间预算（毫秒）；超时退化为快速路径，避免阻塞主链路。 */
+  compressionBudgetMs: z.number().int().positive().default(50),
+  /** 去重总线容量。 */
+  dedupCapacity: z.number().int().positive().default(256),
+})
+
+export type CostKillerConfig = z.infer<typeof Config>
+
+const POLICY_TEXT = [
+  'You are running with CostKillerOrchestrator active.',
+  'Large tool outputs are replaced by a [ADMISSION] receipt holding the absolute spill path: use the read tool instead of re-running the command.',
+  'Compressed history may contain [CORE_CONSTRAINTS] blocks; never drop, reorder, or rewrite those constraints.',
+].join(' ')
+
+interface Counters {
+  admitted: number
+  extracted: number
+  folds: number
+  savedTokens: number
+  rejectedByAnchor: number
+  deduped: number
+}
+
+interface SessionState {
+  prefixHash: string
+  folds: number
+  /** 上一次 pre-step 时已进入请求的 surface 最大 seq（缓存边界）。 */
+  lastSentSeq: number
+}
+
+function textOfContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const record = block as Record<string, unknown>
+    if (record.type === 'reasoning' || record.type === 'thinking') continue
+    if (typeof record.text === 'string') parts.push(record.text)
+  }
+  return parts.join('\n')
+}
+
+function messageText(message: any): string {
+  if (!message || typeof message !== 'object') return ''
+  return textOfContent(message.content) || textOfContent(message.message?.content) || ''
+}
+
+function flattenPlainText(content: unknown): string | undefined {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return undefined
+  let text = ''
+  for (const block of content) {
+    if (!block || typeof block !== 'object') return undefined
+    const record = block as Record<string, unknown>
+    if (record.type !== 'text' || typeof record.text !== 'string') return undefined
+    text += record.text
+  }
+  return text
+}
+
+function collectEntries(session: any): MemoryEntry[] {
+  const nodes: readonly number[] = Array.from(session?.surface?.nodes ?? [])
+  const entries: MemoryEntry[] = []
+  for (const seq of nodes) {
+    let event: any
+    let message: any
+    try {
+      event = session.eventAt?.(seq)
+      if (!event) continue
+      message = session.deriveEventMessage(event)
+    } catch {
+      continue
+    }
+    if (!message) continue
+    entries.push({
+      seq,
+      role: typeof message.role === 'string' ? message.role : String(event.type ?? 'other'),
+      text: messageText(message),
+      isError: event?.type === 'tool/result' && event?.data?.error !== undefined,
+      sourceKind: typeof message?.source?.kind === 'string' ? message.source.kind : undefined,
+    })
+  }
+  return entries
+}
+
+function applyFoldToSurface(session: any, patch: Patch, summary: string, seqs: readonly number[]): boolean {
+  if (seqs.length === 0) return false
+  const message = {
+    id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    role: 'user',
+    content: [{ type: 'text', text: summary }],
+    source: { kind: 'user' },
+  }
+  session.append('user/message', message, {
+    surfaceOp: { op: 'replace', startSeq: seqs[0], endSeq: seqs[seqs.length - 1] },
+    sourceEventSeqs: [...seqs],
+  })
+  return true
+}
+
+function buildStatusTool(getStatus: () => Record<string, unknown>) {
+  return {
+    name: 'costkiller_status',
+    description: 'Return CostKillerOrchestrator runtime counters (admitted outputs, folds, saved tokens).',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          admitted: { type: 'number' },
+          extracted: { type: 'number' },
+          folds: { type: 'number' },
+          savedTokens: { type: 'number' },
+          rejectedByAnchor: { type: 'number' },
+          deduped: { type: 'number' },
+        },
+        required: ['ok', 'admitted', 'extracted', 'folds', 'savedTokens', 'rejectedByAnchor', 'deduped'],
+        additionalProperties: false,
+      },
+      render: (value: unknown) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    execute: async () => getStatus(),
+  }
+}
+
+function resolveConfig(raw: Partial<CostKillerConfig>): CostKillerConfig {
+  const parsed = Config.safeParse(raw ?? {})
+  if (parsed.success) return parsed.data
+  logEvent('warn', 'config.invalid', { error: parsed.error.message })
+  return Config.parse({})
+}
+
+export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): () => void {
+  const config = resolveConfig(rawConfig)
+  const services = ctx as any
+  const disposers: Array<() => void> = []
+  const counters: Counters = { admitted: 0, extracted: 0, folds: 0, savedTokens: 0, rejectedByAnchor: 0, deduped: 0 }
+  let admissionRuns = 0
+  let lastRoutingKey = ''
+  const sessions = new Map<string, SessionState>()
+  const router = new RoutingModule()
+  const breaker = new CompressionBreaker({ name: 'extraction', failureThreshold: 3, cooldownMs: 10 * 60_000 })
+  const dedup = new DedupBus(256)
+
+  const stateFor = (sessionId: string): SessionState => {
+    let state = sessions.get(sessionId)
+    if (!state) {
+      state = { prefixHash: '', folds: 0, lastSentSeq: 0 }
+      sessions.set(sessionId, state)
+    }
+    return state
+  }
+
+  logEvent('info', 'apply.start', { plugin: name, config })
+
+  try {
+    const sectionDisposer = services.systemPrompt?.section?.({
+      name: 'cost-killer:policy',
+      order: 46,
+      text: POLICY_TEXT,
+    })
+    if (typeof sectionDisposer === 'function') disposers.push(sectionDisposer)
+  } catch (error) {
+    logEvent('warn', 'systemPrompt.section.failed', { error: String(error) })
+  }
+
+  try {
+    const toolDisposer = services.tools?.register?.(buildStatusTool(() => ({
+      ok: true,
+      admitted: counters.admitted,
+      extracted: counters.extracted,
+      folds: counters.folds,
+      savedTokens: counters.savedTokens,
+      rejectedByAnchor: counters.rejectedByAnchor,
+      deduped: counters.deduped,
+    })))
+    if (typeof toolDisposer === 'function') disposers.push(toolDisposer)
+  } catch (error) {
+    logEvent('warn', 'tools.register.failed', { error: String(error) })
+  }
+
+  try {
+    const disposeSchema = installSchemaCompressor(services, { enabled: true, maxDescriptionChars: 120 })
+    if (typeof disposeSchema === 'function') disposers.push(disposeSchema)
+  } catch (error) {
+    logEvent('warn', 'schema.install_failed', { error: String(error) })
+  }
+
+  const onPostExecute = async (exec: any, result: any, next: any): Promise<any> => {
+    const decision = await next()
+    try {
+      if (decision?.kind !== 'accept' || Object.prototype.hasOwnProperty.call(decision, 'value')) return decision
+      const content = decision.content ?? result?.content
+      const text = flattenPlainText(content)
+      if (text === undefined) return decision
+
+      // 去重总线：同一输出第二次出现时只留指针（最常见的是重复跑测试/构建/目录列表）。
+      const dedupKeyValue = dedupeKey(text)
+      const dedupHit = dedup.hit(dedupKeyValue)
+      if (dedupHit !== null && estimateTokens(text) > 100) {
+        counters.deduped += 1
+        logEvent('info', 'dedup.hit', {
+          module: 'DedupBus',
+          tokensSaved: dedupHit.entry.tokens,
+          spillPath: dedupHit.entry.spillPath,
+        })
+        return { ...decision, content: [{ type: 'text', text: dedupHit.pointer }] }
+      }
+
+      const tokensBefore = estimateTokens(text)
+      // 先做结构感知提纯（AST / JSON / 索引 / 分节），再做准入落盘；
+      // 两者可叠加：压缩产物 + 原文指针同时保留，保证可逆。
+      // 压缩器自身受 Breaker 保护：连续失败/零收益时跳过，避免死循环与无效算力。
+      let extracted: ReturnType<typeof runExtraction> | null = null
+      if (breaker.canRun()) {
+        extracted = runExtraction({ text, maxTokens: config.extractionTokens, budgetMs: config.compressionBudgetMs })
+        if (!extracted.safe || (extracted.mode !== 'none' && extracted.tokensSaved <= 0)) {
+          breaker.recordFailure(extracted.reason ?? 'no-net-saving')
+        } else if (extracted.mode !== 'none') {
+          breaker.recordSuccess()
+        }
+      } else {
+        logEvent('warn', '[Breaker] skip compression', { module: 'Breaker', state: breaker.state, tool: exec?.tool?.name ?? 'unknown' })
+      }
+
+      const compressed = extracted && extracted.safe && extracted.mode !== 'none' ? extracted.text : text
+      if (extracted && extracted.mode !== 'none' && extracted.safe) counters.extracted += 1
+
+      // 有损模式（AST / 索引 / 分节 / 头尾）必须强制落盘原文并附指针，保证可逆；
+      // JSON 压缩只是去空白，属于无损，不需要额外指针。
+      const lossy = extracted !== null && extracted.safe && extracted.mode !== 'none' && extracted.mode !== 'json'
+      const admitted = runAdmission(text, { maxInlineTokens: lossy ? 0 : config.admissionTokens, spillDir: config.spillDir })
+      if (admitted.admitted) counters.admitted += 1
+      dedup.remember(dedupKeyValue, text, admitted.spilledTo)
+
+      admissionRuns += 1
+      if (admissionRuns % 10 === 0) {
+        const gc = collectGarbage({
+          dir: path.resolve(config.spillDir),
+          maxFiles: config.spillMaxFiles,
+          ttlMs: config.spillTtlHours * 60 * 60_000,
+        })
+        logEvent('info', 'spill.gc', {
+          module: 'SpillGc',
+          scanned: gc.scanned,
+          deleted: gc.deleted.length,
+          kept: gc.kept,
+          pinnedSkipped: gc.pinnedSkipped,
+          freedBytes: gc.freedBytes,
+        })
+      }
+
+      const finalText = admitted.admitted
+        ? compressed === text
+          ? admitted.text
+          : `${compressed}\n\n${admitted.text}`
+        : compressed
+
+      const tokensAfter = estimateTokens(finalText)
+      const saved = Math.max(0, tokensBefore - tokensAfter)
+      counters.savedTokens += saved
+
+      logEvent('info', 'pipeline.tool_output', {
+        module: 'Orchestrator',
+        tool: exec?.tool?.name ?? exec?.name ?? 'unknown',
+        tokensBefore,
+        tokensAfter,
+        saved,
+        extractionMode: extracted?.mode ?? 'none',
+        extractionSafe: extracted?.safe ?? true,
+        lossy,
+        admitted: admitted.admitted,
+        spilledTo: admitted.spilledTo,
+      })
+
+      if (finalText === text) return decision
+      return { ...decision, content: [{ type: 'text', text: finalText }] }
+    } catch (error) {
+      logEvent('warn', 'postExecute.failed', { error: String(error) })
+      return decision
+    }
+  }
+
+  const onPreStep = async (payload: any, next: any): Promise<any> => {
+    const downstream = await next()
+    try {
+      if (!downstream || downstream.kind === 'reject') return downstream
+      const session = payload?.agent?.session
+      if (!session || typeof session.deriveMessages !== 'function') return downstream
+
+      const entries = collectEntries(session)
+      if (entries.length === 0) return downstream
+
+      const sessionId = String(session.id ?? 'unknown')
+      const state = stateFor(sessionId)
+      const tokens = entries.reduce((sum, entry) => sum + estimateTokens(entry.text), 0)
+      const maxSeq = entries.reduce((max, entry) => (entry.seq > max ? entry.seq : max), 0)
+      const previousSent = state.lastSentSeq
+      state.lastSentSeq = maxSeq
+
+      const threshold = Math.floor(config.maxInputTokens * config.foldAtRatio)
+      if (tokens <= threshold) return downstream
+
+      // 角色感知：子代理（agent-message）上下文更窄，保留窗口收缩，避免把子任务历史永久带在主线。
+      const lastUser = [...entries].reverse().find((entry) => entry.role === 'user')
+      const roleAware = lastUser?.sourceKind === 'agent-message'
+      const retainRecent = roleAware ? Math.max(2, config.retainRecent - 3) : config.retainRecent
+      if (roleAware) {
+        logEvent('info', '[RoleAware] subagent context', {
+          module: 'RoleAware',
+          role: 'subagent',
+          retainRecent,
+          totalMessages: entries.length,
+        })
+      }
+
+      const plan = planMemoryFold(entries, { retainRecent, minSaveTokens: config.minSaveTokens })
+
+      // 路由决策：以「压降后」的上下文规模为依据；<4000 且无跨文件依赖 → 强制本地。
+      const routingTokens = Math.max(0, tokens - (plan.patch ? plan.tokensSaved : 0))
+      const routingDecision = router.decide({
+        prompt: lastUser?.text ?? '',
+        contextTokens: routingTokens,
+        crossFileDependency: hasCrossFileDependency(entries.slice(-6).map((entry) => entry.text).join('\n')),
+      })
+      // 只在路由结果发生变化时记录，避免每步刷屏（生产日志体积控制）。
+      const routingKey = `${routingDecision.route}:${routingDecision.reason}`
+      if (routingKey !== lastRoutingKey) {
+        lastRoutingKey = routingKey
+        logEvent('info', 'routing.decision', {
+          module: 'Routing',
+          route: routingDecision.route,
+          reason: routingDecision.reason,
+          contextTokens: routingDecision.contextTokens,
+          tokensBefore: tokens,
+        })
+      }
+      if (config.localRouting && routingDecision.route === 'local') {
+        const routed = await router.attemptLocal(lastUser?.text ?? '')
+        logEvent('info', 'routing.result', {
+          module: 'Routing',
+          route: routed.route,
+          degraded: routed.degraded,
+          latencyMs: routed.latencyMs,
+        })
+      }
+
+      if (!plan.patch) return downstream
+
+      // 缓存语义：补丁若改到「已发送的 seq 区间」即破坏前缀；
+      // 冷读代价只计从改写点开始往后需要重算的 token（前缀缓存命中的部分不受影响）。
+      const firstFoldedSeq = plan.foldedSeqs[0] ?? Number.MAX_SAFE_INTEGER
+      const prefixBreak = previousSent > 0 && firstFoldedSeq <= previousSent
+      const cachedPrefixTokens = entries
+        .filter((entry) => entry.seq >= firstFoldedSeq)
+        .reduce((sum, entry) => sum + estimateTokens(entry.text), 0)
+
+      logEvent('info', 'cache.penetration', {
+        sessionId,
+        firstFoldedSeq,
+        previousSent,
+        prefixBreak,
+        cachedPrefixTokens,
+      })
+
+      const decision = gatePatch({
+        prefixBreak,
+        cachedPrefixTokens,
+        savedByCompression: plan.tokensSaved,
+        savedBySchema: 0,
+        recallPenalty: 0,
+        patch: plan.patch,
+      })
+
+      logEvent('info', 'cache.decision', {
+        sessionId,
+        tokens,
+        prefixBreak,
+        approved: decision.approved,
+        reason: decision.reason,
+        netBenefit: decision.netBenefit,
+        coldReadPenalty: decision.coldReadPenalty,
+        patchId: decision.patchId,
+        savedTokens: plan.tokensSaved,
+      })
+
+      if (!decision.approved) {
+        counters.rejectedByAnchor += 1
+        return downstream
+      }
+
+      const envelope: ContextEnvelope = createEnvelope({
+        meta: { sessionId, turnId: String(payload?.turn ?? 0), targetModel: String(payload?.agent?.model ?? 'unknown'), timestamp: Date.now() },
+        zones: {
+          staticZone: '',
+          dynamicZone: entries.slice(0, Math.max(0, entries.length - config.retainRecent)).map((entry) => entry.text),
+          liveZone: entries.slice(Math.max(0, entries.length - config.retainRecent)).map((entry) => entry.text),
+        },
+        budget: { maxInputTokens: config.maxInputTokens, maxOutputTokens: config.maxOutputTokens, currentEstimatedCost: 0 },
+      })
+      const nextEnvelope = applyPatch(envelope, plan.patch)
+      if (nextEnvelope.ledger.savedByCompression <= 0) return downstream
+
+      applyFoldToSurface(session, plan.patch, plan.summary, plan.foldedSeqs)
+      state.folds += 1
+      counters.folds += 1
+
+      logEvent('info', 'memory.fold_applied', {
+        sessionId,
+        folds: state.folds,
+        foldedMessages: plan.foldedMessages,
+        savedTokens: plan.tokensSaved,
+        ledger: nextEnvelope.ledger,
+        digest: hashText(plan.summary).slice(0, 16),
+      })
+      return downstream
+    } catch (error) {
+      logEvent('warn', 'preStep.failed', { error: String(error) })
+      return downstream
+    }
+  }
+
+  try {
+    const disposePost = services.on?.('tools/post-execute', onPostExecute)
+    if (typeof disposePost === 'function') disposers.push(disposePost)
+  } catch (error) {
+    logEvent('warn', 'hook.postExecute.failed', { error: String(error) })
+  }
+
+  try {
+    const disposePre = services.on?.('agent/pre-step', onPreStep)
+    if (typeof disposePre === 'function') disposers.push(disposePre)
+  } catch (error) {
+    logEvent('warn', 'hook.preStep.failed', { error: String(error) })
+  }
+
+  logEvent('info', 'apply.ready', { plugin: name, mode: 'full', routing: router.circuitOpen ? 'open' : 'closed' })
+
+  return () => {
+    logEvent('info', 'apply.dispose', { plugin: name })
+    for (const dispose of disposers.reverse()) {
+      try {
+        dispose()
+      } catch {}
+    }
+    disposers.length = 0
+  }
+}

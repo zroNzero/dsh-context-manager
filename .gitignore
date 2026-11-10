@@ -1,0 +1,12 @@
+node_modules/
+dist/
+debug.log
+debug.log.*
+*.log
+spill/
+.demo-spill/
+.npm-cache/
+.dsh-favorites/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
