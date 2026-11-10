@@ -20,6 +20,8 @@ export interface MemoryEntry {
   isError?: boolean
   /** 消息来源种类（user / agent-message / runtime-context…），用于角色感知保留窗口。 */
   sourceKind?: string
+  /** 是否包含 tool-call 块。带工具调用的 assistant 消息绝不能折叠（会留下孤儿 tool/call）。 */
+  hasToolCall?: boolean
 }
 
 export interface MemoryPlan {
@@ -153,8 +155,22 @@ export function planMemoryFold(
   }
 
   // 候选：非 user、不在保留窗口、不是最后结论。
+  // 安全边界（2026-11-10 事故修复）：tool/call 事件是日志级、不在 surface 上，
+  // 折叠带 tool-call 的 assistant 会留下孤儿 tool/call，导致 DeepSeek 报
+  // "tool calls need immediate results"。因此带 tool-call 的 assistant 与所有
+  // tool 结果一律不参与折叠，只折叠纯文本 / CoT 消息。
+  let blockedByToolCall = 0
   const flags: boolean[] = entries.map((entry, index) => {
     if (entry.role === 'user') return false
+    if (entry.role === 'tool') {
+      blockedByToolCall += 1
+      return false
+    }
+    if (entry.role === 'system') return false
+    if (entry.hasToolCall === true) {
+      blockedByToolCall += 1
+      return false
+    }
     if (index >= entries.length - retainRecent) return false
     if (index === lastAssistant) return false
     if (entry.text.trim().length === 0) return false
@@ -182,6 +198,17 @@ export function planMemoryFold(
   }
 
   const candidates: MemoryEntry[] = bestStart >= 0 ? entries.slice(bestStart, bestStart + bestLength) : []
+
+  // 二次防线：即使上方 flags 被改坏，也绝不把 tool-call / tool 结果放进补丁。
+  if (candidates.some((entry) => entry.hasToolCall === true || entry.role === 'tool')) {
+    logEvent('warn', 'memory.pairing_rejected', {
+      module: 'Memory',
+      reason: 'candidate range contains tool-call or tool result',
+      blockedByToolCall,
+    })
+    return { ...empty, tokensBefore, tokensAfter: tokensBefore }
+  }
+
   if (candidates.length === 0) return { ...empty, tokensBefore, tokensAfter: tokensBefore }
 
   // CoT 蒸馏：先剪思考块，再做摘要。
@@ -267,6 +294,7 @@ export function planMemoryFold(
     indexIncluded: indexBlock.length > 0,
     qualityPass,
     backfilled,
+    toolcallExcluded: blockedByToolCall,
     patchId: patch.patchId,
   })
 

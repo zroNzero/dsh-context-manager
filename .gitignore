@@ -9,3 +9,7 @@ spill/
 *.tsbuildinfo
 .DS_Store
 Thumbs.db
+
+session-*.cjs
+session-dump.jsonl
+.session-*

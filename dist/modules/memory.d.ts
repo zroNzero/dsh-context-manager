@@ -16,6 +16,8 @@ export interface MemoryEntry {
     isError?: boolean;
     /** 消息来源种类（user / agent-message / runtime-context…），用于角色感知保留窗口。 */
     sourceKind?: string;
+    /** 是否包含 tool-call 块。带工具调用的 assistant 消息绝不能折叠（会留下孤儿 tool/call）。 */
+    hasToolCall?: boolean;
 }
 export interface MemoryPlan {
     patch: Patch | null;

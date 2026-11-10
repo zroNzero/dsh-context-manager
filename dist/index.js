@@ -148,12 +148,18 @@ function collectEntries(session) {
         }
         if (!message)
             continue;
+        const content = message?.content;
+        const contentHasToolCall = Array.isArray(content) && content.some((block) => block?.type === 'tool-call');
+        const declaredToolCalls = (Array.isArray(message?.toolCalls) && message.toolCalls.length > 0) ||
+            (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0);
+        const hasToolCall = contentHasToolCall || declaredToolCalls;
         entries.push({
             seq,
             role: typeof message.role === 'string' ? message.role : String(event.type ?? 'other'),
             text: messageText(message),
             isError: event?.type === 'tool/result' && event?.data?.error !== undefined,
             sourceKind: typeof message?.source?.kind === 'string' ? message.source.kind : undefined,
+            hasToolCall,
         });
     }
     return entries;

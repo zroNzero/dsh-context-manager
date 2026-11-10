@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.0.4 — 2026-11-10
+
+### 事故修复：折叠导致 `INVALID_REQUEST`
+
+- **现象**：会话 turn 21–23 连续失败
+  `DeepSeek Messages tool calls need immediate results (INVALID_REQUEST)`。
+- **定位**（session `b82b2558` 日志）：
+  - fold #1（seq 2538，范围 1160–1186）包含 3 条带 tool-call 的 assistant；
+    DSH 的 `tool/call` 事件是日志级、`surfaceOp=null`，不随区间替换移除，
+    于是工具调用与其结果被拆散 → 后续请求非法。
+  - fold #2（seq 2569，范围 1641–1663）只含纯文本 assistant，turn 24 正常完成。
+- **修复**：折叠候选永久排除 `role === 'tool'`、`role === 'system'`、
+  以及 `hasToolCall === true` 的 assistant。历史折叠从此只处理纯文本 / CoT 消息，
+  工具结果继续由源头流控（Extraction/Admission）与去重总线治理。
+  事故完整记录见 [docs/INCIDENT-2026-11-10-toolcall-fold.md](docs/INCIDENT-2026-11-10-toolcall-fold.md)。
+- **回归测试**：`self-test` 新增 `memory.fold-excludes-toolcall`，禁止任何 tool-call
+  消息进入折叠区间。
+- **宿主契约测试**：新增 `src/host-sim.ts`（surface + 日志级 tool/call 模拟器）与
+  `test/fixtures/toolcall-fold.json`（事故片段回放）。可复现“消息级配对合法、
+  但 tool/call 失去承载 assistant”这一宿主侧违约。
+- **延迟安装测试**：`verify` 新增“llm 服务晚于插件就绪”用例，确认 schema 压缩
+  会自动补装。
+
 ## v1.0.3 — 2026-11-10
 
 ### 修复

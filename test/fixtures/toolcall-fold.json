@@ -1,0 +1,25 @@
+{
+  "note": "Sanitized excerpt of session b82b2558 around the 2026-11-10 folding incident. tool/call events are log-only (onSurface=false) and are NOT removed by surface range replacement.",
+  "range": { "start": 1160, "end": 1186 },
+  "events": [
+    { "seq": 1152, "type": "assistant/message", "role": "assistant", "toolCalls": ["call_1152_a", "call_1152_b"] },
+    { "seq": 1154, "type": "tool/result", "role": "tool", "toolCallId": "call_1152_a" },
+    { "seq": 1156, "type": "tool/result", "role": "tool", "toolCallId": "call_1152_b" },
+    { "seq": 1160, "type": "assistant/message", "role": "assistant", "toolCalls": ["call_1160_a"] },
+    { "seq": 1161, "type": "tool/call", "onSurface": false, "toolCallId": "call_1160_a" },
+    { "seq": 1164, "type": "tool/result", "role": "tool", "toolCallId": "call_1160_a" },
+    { "seq": 1168, "type": "assistant/message", "role": "assistant", "toolCalls": ["call_1168_a", "call_1168_b"] },
+    { "seq": 1169, "type": "tool/call", "onSurface": false, "toolCallId": "call_1168_a" },
+    { "seq": 1172, "type": "tool/result", "role": "tool", "toolCallId": "call_1168_a" },
+    { "seq": 1173, "type": "tool/call", "onSurface": false, "toolCallId": "call_1168_b" },
+    { "seq": 1178, "type": "tool/result", "role": "tool", "toolCallId": "call_1168_b" },
+    { "seq": 1182, "type": "assistant/message", "role": "assistant", "toolCalls": ["call_1182_a", "call_1182_b"] },
+    { "seq": 1183, "type": "tool/call", "onSurface": false, "toolCallId": "call_1182_a" },
+    { "seq": 1184, "type": "tool/result", "role": "tool", "toolCallId": "call_1182_a" },
+    { "seq": 1185, "type": "tool/call", "onSurface": false, "toolCallId": "call_1182_b" },
+    { "seq": 1186, "type": "tool/result", "role": "tool", "toolCallId": "call_1182_b" },
+    { "seq": 1190, "type": "assistant/message", "role": "assistant", "toolCalls": ["call_1190_a", "call_1190_b"] },
+    { "seq": 1192, "type": "tool/result", "role": "tool", "toolCallId": "call_1190_a" },
+    { "seq": 1194, "type": "tool/result", "role": "tool", "toolCallId": "call_1190_b" }
+  ]
+}

@@ -5,9 +5,16 @@
  * 2. Extraction 的 AST 结构保留与 Fail-Closed 兜底。
  * 输出同时写入 ./debug.log 与 stdout（不使用 console.log）。
  */
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
+const node_fs_1 = __importDefault(require("node:fs"));
+const node_path_1 = __importDefault(require("node:path"));
 const cacheAnchor_1 = require("./cacheAnchor");
 const extraction_1 = require("./modules/extraction");
+const memory_1 = require("./modules/memory");
+const host_sim_1 = require("./host-sim");
 const log_1 = require("./log");
 const outcomes = [];
 function check(name, fn) {
@@ -22,6 +29,10 @@ function check(name, fn) {
 function assert(condition, message) {
     if (!condition)
         throw new Error(message);
+}
+function assertEqual(actual, expected, message) {
+    if (actual !== expected)
+        throw new Error(`${message} (expected=${String(expected)}, actual=${String(actual)})`);
 }
 function buildCodeFixture(methods) {
     const lines = [
@@ -84,6 +95,64 @@ check('extraction.fail-closed-unparseable', () => {
     assert(result.mode === 'none', 'unsafe extraction must not report a compression mode');
     assert(result.text === broken, 'unsafe extraction must return the original text unchanged');
     assert(typeof result.reason === 'string' && result.reason.includes('fail-closed'), 'reason must explain fail-closed');
+});
+// ---------------------------------------------------------------------------
+// 4) Memory 折叠安全边界（2026-11-10 事故回归测试）
+// ---------------------------------------------------------------------------
+check('memory.fold-excludes-toolcall', () => {
+    const entries = [];
+    for (let index = 0; index < 6; index += 1) {
+        entries.push({ seq: index * 4 + 1, role: 'assistant', text: `决定采用方案 ${index}：${'x'.repeat(400)}`, hasToolCall: true });
+        entries.push({ seq: index * 4 + 2, role: 'tool', text: `Error: ENOENT ${'y'.repeat(400)}`, isError: true });
+        entries.push({ seq: index * 4 + 3, role: 'assistant', text: `思考 ${index}：${'z'.repeat(400)}` });
+        entries.push({ seq: index * 4 + 4, role: 'user', text: `需求 ${index}` });
+    }
+    const plan = (0, memory_1.planMemoryFold)(entries, { retainRecent: 2, minSaveTokens: 1 });
+    if (plan.patch) {
+        for (const seq of plan.foldedSeqs) {
+            const entry = entries.find((item) => item.seq === seq);
+            assert(entry !== undefined, 'folded seq must exist');
+            assert(entry.role !== 'tool', 'tool results must never be folded');
+            assert(entry.hasToolCall !== true, 'tool-call assistant messages must never be folded');
+        }
+    }
+    // 全是 tool-call / tool 结果时，必须完全拒绝折叠。
+    const onlyTools = [
+        { seq: 1, role: 'assistant', text: `决定 ${'a'.repeat(600)}`, hasToolCall: true },
+        { seq: 2, role: 'tool', text: `Error: ${'b'.repeat(600)}`, isError: true },
+        { seq: 3, role: 'assistant', text: `决定 ${'c'.repeat(600)}`, hasToolCall: true },
+        { seq: 4, role: 'tool', text: `Error: ${'d'.repeat(600)}`, isError: true },
+        { seq: 5, role: 'assistant', text: `结论 ${'e'.repeat(600)}` },
+    ];
+    const blocked = (0, memory_1.planMemoryFold)(onlyTools, { retainRecent: 1, minSaveTokens: 1 });
+    assert(blocked.patch === null, 'all-tool history must not be folded');
+    assert(blocked.foldedSeqs.length === 0, 'no seqs may be folded');
+});
+// ---------------------------------------------------------------------------
+// 5) 宿主契约回归：2026-11-10 事故片段回放
+// ---------------------------------------------------------------------------
+check('host-sim.incident-replay', () => {
+    const fixturePath = node_path_1.default.resolve(process.cwd(), 'test/fixtures/toolcall-fold.json');
+    assert(node_fs_1.default.existsSync(fixturePath), `fixture missing: ${fixturePath}`);
+    const fixture = JSON.parse(node_fs_1.default.readFileSync(fixturePath, 'utf8'));
+    const healthy = new host_sim_1.HostSimulator(fixture.events).build();
+    assertEqual(healthy.validate().length, 0, 'healthy fixture must satisfy host contract');
+    const folded = (0, host_sim_1.simulateRangeFold)(healthy.messages(), fixture.range.start, fixture.range.end);
+    assertEqual((0, host_sim_1.validateMessages)(folded).length, 0, 'message-level pairing stays valid after range fold (why old tests passed)');
+    const foldedSim = new host_sim_1.HostSimulator([
+        ...fixture.events,
+        { seq: 9999, type: 'user/message', role: 'user', text: '[MEMORY] folded', replace: { ...fixture.range } },
+    ]).build();
+    const violations = foldedSim.validate();
+    assert(violations.some((line) => line.includes('has no surface assistant')), `simulator must detect orphan tool/call, got: ${violations.join('; ') || '(none)'}`);
+    const entries = healthy.messages().map((message) => ({
+        seq: message.seq,
+        role: message.role,
+        text: message.text.length > 0 ? message.text : `tool result ${message.toolCallId ?? ''}`.repeat(4),
+        hasToolCall: message.toolCalls.length > 0,
+    }));
+    const plan = (0, memory_1.planMemoryFold)(entries, { retainRecent: 1, minSaveTokens: 1 });
+    assert(plan.patch === null, 'incident fixture must not produce a fold patch');
 });
 // ---------------------------------------------------------------------------
 // 汇总

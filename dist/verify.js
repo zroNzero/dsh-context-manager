@@ -141,6 +141,38 @@ async function main() {
         assert(after < before * 0.8, `schema compression ineffective: ${before}->${after}`);
         assert(sent.tools.length === schemaTools.length, 'capability set must stay intact');
     });
+    await check('schema install defers until llm service is ready', async () => {
+        const ctx2 = {
+            systemPrompt: { section: () => () => { } },
+            tools: { register: () => () => { } },
+            on: () => () => { },
+        };
+        const dispose2 = (0, index_1.apply)(ctx2, cfg);
+        const captured2 = [];
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        ctx2.llm = {
+            stream(request) {
+                captured2.push(request);
+                return (async function* () { })();
+            },
+        };
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        const lateTools = Array.from({ length: 20 }, (_, index) => ({
+            name: `late_tool_${index}`,
+            description: 'long deferred description '.repeat(30),
+            parameters: { type: 'object', properties: {} },
+        }));
+        ctx2.llm.stream({
+            provider: 'p',
+            model: 'm',
+            messages: [{ role: 'user', content: [{ type: 'text', text: '分析' }] }],
+            tools: lateTools,
+        });
+        assert(captured2.length === 1, 'late llm stream was not captured');
+        const description = String(captured2[0].tools[0].description ?? '');
+        assert(description.length <= 121, `deferred install did not patch stream (len=${description.length})`);
+        dispose2();
+    });
     await check('tool output compressed with recoverable pointer', async () => {
         const post = hooks.get('tools/post-execute');
         const payload = bigCode(160);
@@ -199,6 +231,30 @@ async function main() {
         const before = session.appended.length;
         await pre({ agent: { session, model: 'm' }, turn: 2, step: 1, messages: [] }, async () => ({ kind: 'enter', messages: [] }));
         assert(session.appended.length === before, 'prefix-breaking patch must be blocked');
+    });
+    await check('pre-step never folds tool-call history', async () => {
+        const session = new FakeSession();
+        session.id = 'verify-toolcall';
+        session.add('user/message', { role: 'user', content: [{ type: 'text', text: '需求：修复 bug' }] });
+        for (let index = 0; index < 10; index += 1) {
+            session.add('assistant/message', {
+                role: 'assistant',
+                content: [
+                    { type: 'tool-call', callId: `call_${index}` },
+                    { type: 'text', text: 'x'.repeat(300) },
+                ],
+            });
+            session.add('tool/result', {
+                role: 'tool',
+                toolCallId: `call_${index}`,
+                content: [{ type: 'text', text: 'y'.repeat(300) }],
+            });
+        }
+        session.add('assistant/message', { role: 'assistant', content: [{ type: 'text', text: '结论：完成' }] });
+        const pre = hooks.get('agent/pre-step');
+        const before = session.appended.length;
+        await pre({ agent: { session, model: 'm' }, turn: 1, step: 1, messages: [] }, async () => ({ kind: 'enter', messages: [] }));
+        assert(session.appended.length === before, 'tool-call history must never be folded end-to-end');
     });
     await check('no console.log in sources', () => {
         const dir = node_path_1.default.resolve('src');
