@@ -42,12 +42,15 @@ function resolveSessionWorkspace(session, agent) {
     const candidates = [
         session?.cwd,
         session?.header?.cwd,
+        session?.meta?.cwd,
+        session?.info?.cwd,
         session?.workspace,
         session?.workspacePath,
         session?.projectRoot,
         session?.options?.cwd,
         agent?.options?.cwd,
         agent?.loopCtx?.options?.cwd,
+        agent?.session?.header?.cwd,
     ];
     for (const candidate of candidates) {
         if (typeof candidate === 'string' && candidate.trim().length > 0)

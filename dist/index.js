@@ -544,7 +544,15 @@ function apply(ctx, rawConfig = {}) {
                 return downstream;
             const sessionId = String(session.id ?? 'unknown');
             const workspace = workspaceFor(session, payload?.agent);
-            sessionWorkspaces.set(sessionId, workspace);
+            if (!sessionWorkspaces.has(sessionId)) {
+                sessionWorkspaces.set(sessionId, workspace);
+                (0, log_1.logEvent)('info', 'workspace.resolved', {
+                    sessionId,
+                    workspace: workspace.path,
+                    workspaceId: workspace.id,
+                    label: workspace.label,
+                });
+            }
             const state = stateFor(sessionId);
             const tokens = entries.reduce((sum, entry) => sum + (0, contracts_1.estimateTokens)(entry.text), 0);
             const maxSeq = entries.reduce((max, entry) => (entry.seq > max ? entry.seq : max), 0);

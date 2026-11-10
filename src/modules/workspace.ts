@@ -43,12 +43,15 @@ export function resolveSessionWorkspace(session: any, agent?: any): string | nul
   const candidates: unknown[] = [
     session?.cwd,
     session?.header?.cwd,
+    session?.meta?.cwd,
+    session?.info?.cwd,
     session?.workspace,
     session?.workspacePath,
     session?.projectRoot,
     session?.options?.cwd,
     agent?.options?.cwd,
     agent?.loopCtx?.options?.cwd,
+    agent?.session?.header?.cwd,
   ]
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate.trim().length > 0) return candidate

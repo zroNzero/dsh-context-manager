@@ -529,7 +529,15 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
       const sessionId = String(session.id ?? 'unknown')
       const workspace = workspaceFor(session, payload?.agent)
-      sessionWorkspaces.set(sessionId, workspace)
+      if (!sessionWorkspaces.has(sessionId)) {
+        sessionWorkspaces.set(sessionId, workspace)
+        logEvent('info', 'workspace.resolved', {
+          sessionId,
+          workspace: workspace.path,
+          workspaceId: workspace.id,
+          label: workspace.label,
+        })
+      }
       const state = stateFor(sessionId)
       const tokens = entries.reduce((sum, entry) => sum + estimateTokens(entry.text), 0)
       const maxSeq = entries.reduce((max, entry) => (entry.seq > max ? entry.seq : max), 0)
