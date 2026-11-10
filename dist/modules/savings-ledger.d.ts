@@ -17,6 +17,12 @@ export interface SavingsSnapshot {
     updatedAt: string;
     totalSavedTokens: number;
     byModule: Record<SavingsModule, number>;
+    /** 按请求累计的节省（schema 每次请求都会生效）。 */
+    perRequestSavings: number;
+    /** 单次事件节省（admission / extraction / dedup）。 */
+    eventSavings: number;
+    /** 一次性上下文缩减（fold）：只计一次，后续请求持续受益但不重复累加。 */
+    contextReduction: number;
     events: number;
     folds: number;
     rejectedByAnchor: number;

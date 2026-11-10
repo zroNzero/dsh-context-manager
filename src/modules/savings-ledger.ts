@@ -20,6 +20,12 @@ export interface SavingsSnapshot {
   updatedAt: string
   totalSavedTokens: number
   byModule: Record<SavingsModule, number>
+  /** 按请求累计的节省（schema 每次请求都会生效）。 */
+  perRequestSavings: number
+  /** 单次事件节省（admission / extraction / dedup）。 */
+  eventSavings: number
+  /** 一次性上下文缩减（fold）：只计一次，后续请求持续受益但不重复累加。 */
+  contextReduction: number
   events: number
   folds: number
   rejectedByAnchor: number
@@ -66,11 +72,15 @@ export class SavingsLedger {
   }
 
   snapshot(): SavingsSnapshot {
+    const byModule = { ...this.byModule }
     return {
       startedAt: new Date(this.startedAt).toISOString(),
       updatedAt: new Date(this.updatedAt).toISOString(),
       totalSavedTokens: this.total,
-      byModule: { ...this.byModule },
+      byModule,
+      perRequestSavings: byModule.schema,
+      eventSavings: byModule.admission + byModule.extraction + byModule.dedup,
+      contextReduction: byModule.fold,
       events: this.eventCount,
       folds: this.foldCount,
       rejectedByAnchor: this.rejected,
@@ -95,7 +105,14 @@ export class SavingsLedger {
       `- updated: ${snapshot.updatedAt}`,
       `- started: ${snapshot.startedAt}`,
       `- total saved tokens: **${snapshot.totalSavedTokens}**`,
+      `- 按请求累计（schema）: ${snapshot.perRequestSavings}`,
+      `- 单次事件（admission/extraction/dedup）: ${snapshot.eventSavings}`,
+      `- 一次性上下文缩减（fold）: ${snapshot.contextReduction}`,
       `- events: ${snapshot.events} | folds: ${snapshot.folds} | rejected by CacheAnchor: ${snapshot.rejectedByAnchor}`,
+      '',
+      '> 口径说明：fold 是一次性上下文缩减（只记一次，后续请求持续受益但不重复累加）；',
+      '> schema 是每次请求都生效的累计节省；admission/extraction/dedup 是单次事件节省。',
+      '> 三者相加是「估算的 token 削减量」，不等同于账单差额。',
       '',
       '## By module',
       '',

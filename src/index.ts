@@ -215,6 +215,9 @@ function buildStatusTool(getStatus: () => Record<string, unknown>) {
           savedByDedup: { type: 'number' },
           savedByFold: { type: 'number' },
           savedBySchema: { type: 'number' },
+          perRequestSavings: { type: 'number' },
+          eventSavings: { type: 'number' },
+          contextReduction: { type: 'number' },
           savingsFile: { type: 'string' },
         },
         required: [
@@ -230,6 +233,9 @@ function buildStatusTool(getStatus: () => Record<string, unknown>) {
           'savedByDedup',
           'savedByFold',
           'savedBySchema',
+          'perRequestSavings',
+          'eventSavings',
+          'contextReduction',
           'savingsFile',
         ],
         additionalProperties: false,
@@ -317,6 +323,9 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         savedByDedup: snapshot.byModule.dedup,
         savedByFold: snapshot.byModule.fold,
         savedBySchema: snapshot.byModule.schema,
+        perRequestSavings: snapshot.perRequestSavings,
+        eventSavings: snapshot.eventSavings,
+        contextReduction: snapshot.contextReduction,
         savingsFile: savingsMarkdown,
       }
     }))

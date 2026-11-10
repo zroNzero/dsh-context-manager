@@ -184,6 +184,25 @@ check('host-sim.incident-replay', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 6) 折叠记账口径（2026-11-10 面板数字虚高事故）
+// ---------------------------------------------------------------------------
+
+check('memory.savings-accounting', () => {
+  const entries: MemoryEntry[] = []
+  for (let index = 0; index < 20; index += 1) {
+    entries.push({ seq: index * 3 + 1, role: 'user', text: '需求'.repeat(2000) })
+  }
+  entries.push({ seq: 1000, role: 'assistant', text: `决定采用方案：${'x'.repeat(4000)}` })
+  entries.push({ seq: 2000, role: 'assistant', text: `结论：${'y'.repeat(200)}` })
+
+  const plan = planMemoryFold(entries, { retainRecent: 1, minSaveTokens: 1 })
+  assert(plan.patch !== null, 'expected a fold patch for the text candidate')
+  assert(plan.tokensBefore <= 1200, `fold tokensBefore must count candidates only, got ${plan.tokensBefore}`)
+  assert(plan.tokensSaved <= 1200, `fold tokensSaved must count candidates only, got ${plan.tokensSaved}`)
+  assert((plan.contextTokens ?? 0) > 10000, `contextTokens should reflect the full context, got ${plan.contextTokens}`)
+})
+
+// ---------------------------------------------------------------------------
 // 汇总
 // ---------------------------------------------------------------------------
 

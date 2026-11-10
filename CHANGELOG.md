@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.7 — 2026-11-10
+
+### 修复：折叠记账虚高（面板数字不符预期）
+
+- `planMemoryFold` 曾用「整个上下文的 token 数」作为节省基数，
+  实际只折叠了少量候选消息，导致 fold 节省被放大到整个上下文
+  （例：只折叠 1 条消息却记 163,287 tokens），同时虚高 CacheAnchor 的净收益。
+- 现在按「实际候选消息 token − 摘要 token」计量；上下文总量单独作为
+  `contextTokens` 仅用于观测。
+- 节省面板新增口径区分：`perRequestSavings`（schema，按请求累计）、
+  `eventSavings`（admission/extraction/dedup）、`contextReduction`（fold，一次性），
+  并在 `savings.md` 写明三者相加不等于账单。
+- 回归测试：`memory.savings-accounting`（大上下文 + 小候选，断言节省不超过候选本身）。
+
 ## v1.0.6 — 2026-11-10
 
 ### 清理

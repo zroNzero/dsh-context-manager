@@ -44,11 +44,15 @@ class SavingsLedger {
         return Object.values(this.byModule).reduce((sum, value) => sum + value, 0);
     }
     snapshot() {
+        const byModule = { ...this.byModule };
         return {
             startedAt: new Date(this.startedAt).toISOString(),
             updatedAt: new Date(this.updatedAt).toISOString(),
             totalSavedTokens: this.total,
-            byModule: { ...this.byModule },
+            byModule,
+            perRequestSavings: byModule.schema,
+            eventSavings: byModule.admission + byModule.extraction + byModule.dedup,
+            contextReduction: byModule.fold,
             events: this.eventCount,
             folds: this.foldCount,
             rejectedByAnchor: this.rejected,
@@ -71,7 +75,14 @@ class SavingsLedger {
             `- updated: ${snapshot.updatedAt}`,
             `- started: ${snapshot.startedAt}`,
             `- total saved tokens: **${snapshot.totalSavedTokens}**`,
+            `- 按请求累计（schema）: ${snapshot.perRequestSavings}`,
+            `- 单次事件（admission/extraction/dedup）: ${snapshot.eventSavings}`,
+            `- 一次性上下文缩减（fold）: ${snapshot.contextReduction}`,
             `- events: ${snapshot.events} | folds: ${snapshot.folds} | rejected by CacheAnchor: ${snapshot.rejectedByAnchor}`,
+            '',
+            '> 口径说明：fold 是一次性上下文缩减（只记一次，后续请求持续受益但不重复累加）；',
+            '> schema 是每次请求都生效的累计节省；admission/extraction/dedup 是单次事件节省。',
+            '> 三者相加是「估算的 token 削减量」，不等同于账单差额。',
             '',
             '## By module',
             '',

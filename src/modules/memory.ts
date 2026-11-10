@@ -28,10 +28,13 @@ export interface MemoryPlan {
   patch: Patch | null
   foldedSeqs: number[]
   foldedMessages: number
+  /** 被折叠候选消息的 token 数（不是整个上下文的 token 数）。 */
   tokensBefore: number
   tokensAfter: number
   tokensSaved: number
   summary: string
+  /** 折叠发生时整个上下文的 token 数，仅用于观测，不参与净收益计算。 */
+  contextTokens?: number
   /** CoT 蒸馏统计。 */
   cotSegments: number
   cotCharsBefore: number
@@ -144,7 +147,9 @@ export function planMemoryFold(
   }
   if (entries.length === 0) return empty
 
-  const tokensBefore = entries.reduce((sum, entry) => sum + estimate(entry.text), 0)
+  // 上下文总量只用于观测；净收益必须按「实际被折叠的候选消息」计量，
+  // 否则会把整段历史算成节省，虚高 CacheAnchor 的 netBenefit（2026-11-10 记账事故）。
+  const contextTokens = entries.reduce((sum, entry) => sum + estimate(entry.text), 0)
 
   let lastAssistant = -1
   for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -198,6 +203,7 @@ export function planMemoryFold(
   }
 
   const candidates: MemoryEntry[] = bestStart >= 0 ? entries.slice(bestStart, bestStart + bestLength) : []
+  const candidateTokens = candidates.reduce((sum, entry) => sum + estimate(entry.text), 0)
 
   // 二次防线：即使上方 flags 被改坏，也绝不把 tool-call / tool 结果放进补丁。
   if (candidates.some((entry) => entry.hasToolCall === true || entry.role === 'tool')) {
@@ -206,10 +212,10 @@ export function planMemoryFold(
       reason: 'candidate range contains tool-call or tool result',
       blockedByToolCall,
     })
-    return { ...empty, tokensBefore, tokensAfter: tokensBefore }
+    return { ...empty, tokensBefore: candidateTokens, tokensAfter: candidateTokens, contextTokens }
   }
 
-  if (candidates.length === 0) return { ...empty, tokensBefore, tokensAfter: tokensBefore }
+  if (candidates.length === 0) return { ...empty, tokensBefore: 0, tokensAfter: 0, contextTokens }
 
   // CoT 蒸馏：先剪思考块，再做摘要。
   let cotSegments = 0
@@ -250,7 +256,7 @@ export function planMemoryFold(
     lines.push(indexBlock)
     lines.push('')
   }
-  lines.push(`[MEMORY] 已折叠 ${candidates.length} 条中间消息（约 ${tokensBefore} tokens 的历史尝试）。`)
+  lines.push(`[MEMORY] 已折叠 ${candidates.length} 条中间消息（约 ${candidateTokens} tokens 的历史尝试）。`)
   if (cotSegments > 0) {
     lines.push(`[CoT] 已蒸馏 ${cotSegments} 段思考（${cotCharsBefore} → ${cotCharsAfter} 字符）。`)
   }
@@ -266,10 +272,10 @@ export function planMemoryFold(
   const backfilled = missingConstraints.length
   const qualityPass = index.constraints.every((value) => summary.includes(value.replace(/…$/, '')))
   const tokensAfter = estimate(summary)
-  const tokensSaved = tokensBefore - tokensAfter
+  const tokensSaved = candidateTokens - tokensAfter
 
   if (tokensSaved < minSaveTokens) {
-    return { ...empty, tokensBefore, tokensAfter: tokensBefore, summary, cotSegments, cotCharsBefore, cotCharsAfter }
+    return { ...empty, tokensBefore: candidateTokens, tokensAfter: candidateTokens, contextTokens, summary, cotSegments, cotCharsBefore, cotCharsAfter }
   }
 
   const first = candidates[0]!
@@ -284,7 +290,8 @@ export function planMemoryFold(
   logEvent('info', 'memory.planned', {
     module: 'Memory',
     folded: candidates.length,
-    tokensBefore,
+    tokensBefore: candidateTokens,
+    contextTokens,
     tokensAfter,
     tokensSaved,
     cotSegments,
@@ -302,7 +309,8 @@ export function planMemoryFold(
     patch,
     foldedSeqs: candidates.map((entry) => entry.seq),
     foldedMessages: candidates.length,
-    tokensBefore,
+    tokensBefore: candidateTokens,
+    contextTokens,
     tokensAfter,
     tokensSaved,
     summary,

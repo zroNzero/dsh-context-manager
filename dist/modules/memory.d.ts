@@ -23,10 +23,13 @@ export interface MemoryPlan {
     patch: Patch | null;
     foldedSeqs: number[];
     foldedMessages: number;
+    /** 被折叠候选消息的 token 数（不是整个上下文的 token 数）。 */
     tokensBefore: number;
     tokensAfter: number;
     tokensSaved: number;
     summary: string;
+    /** 折叠发生时整个上下文的 token 数，仅用于观测，不参与净收益计算。 */
+    contextTokens?: number;
     /** CoT 蒸馏统计。 */
     cotSegments: number;
     cotCharsBefore: number;

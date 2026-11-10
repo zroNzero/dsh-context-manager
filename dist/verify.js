@@ -232,6 +232,12 @@ async function main() {
     });
     const session = new FakeSession();
     session.add('user/message', { role: 'user', content: [{ type: 'text', text: '需求：修复 C:\\repo\\app.ts，TODO: 补测试' }] });
+    for (let index = 0; index < 3; index += 1) {
+        session.add('assistant/message', {
+            role: 'assistant',
+            content: [{ type: 'text', text: `<thought>${'思考 '.repeat(200)}</thought> 决定采用方案 ${index}：${'w'.repeat(3000)}` }],
+        });
+    }
     for (let index = 0; index < 10; index += 1) {
         session.add('assistant/message', {
             role: 'assistant',

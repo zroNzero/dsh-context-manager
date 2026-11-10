@@ -231,6 +231,9 @@ function buildStatusTool(getStatus) {
                     savedByDedup: { type: 'number' },
                     savedByFold: { type: 'number' },
                     savedBySchema: { type: 'number' },
+                    perRequestSavings: { type: 'number' },
+                    eventSavings: { type: 'number' },
+                    contextReduction: { type: 'number' },
                     savingsFile: { type: 'string' },
                 },
                 required: [
@@ -246,6 +249,9 @@ function buildStatusTool(getStatus) {
                     'savedByDedup',
                     'savedByFold',
                     'savedBySchema',
+                    'perRequestSavings',
+                    'eventSavings',
+                    'contextReduction',
                     'savingsFile',
                 ],
                 additionalProperties: false,
@@ -331,6 +337,9 @@ function apply(ctx, rawConfig = {}) {
                 savedByDedup: snapshot.byModule.dedup,
                 savedByFold: snapshot.byModule.fold,
                 savedBySchema: snapshot.byModule.schema,
+                perRequestSavings: snapshot.perRequestSavings,
+                eventSavings: snapshot.eventSavings,
+                contextReduction: snapshot.contextReduction,
                 savingsFile: savingsMarkdown,
             };
         }));
