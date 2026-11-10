@@ -34,6 +34,7 @@ import { installSchemaCompressor } from './modules/schema-index'
 import { CompressionBreaker } from './modules/breaker'
 import { DedupBus, dedupeKey } from './modules/dedup-bus'
 import { SavingsLedger } from './modules/savings-ledger'
+import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modules/workspace'
 
 export const name = 'dsh-context-manager'
 export const inject = ['systemPrompt', 'tools', 'sessions', 'agents']
@@ -219,6 +220,9 @@ function buildStatusTool(getStatus: () => Record<string, unknown>) {
           eventSavings: { type: 'number' },
           contextReduction: { type: 'number' },
           estimatedCostTokens: { type: 'number' },
+          tokensBeforeTotal: { type: 'number' },
+          tokensAfterTotal: { type: 'number' },
+          workspaceCount: { type: 'number' },
           schemaVersion: { type: 'number' },
           ledgerId: { type: 'string' },
           revision: { type: 'number' },
@@ -241,6 +245,9 @@ function buildStatusTool(getStatus: () => Record<string, unknown>) {
           'eventSavings',
           'contextReduction',
           'estimatedCostTokens',
+          'tokensBeforeTotal',
+          'tokensAfterTotal',
+          'workspaceCount',
           'schemaVersion',
           'ledgerId',
           'revision',
@@ -302,6 +309,11 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     return state
   }
 
+  // 会话 -> 工作区映射：schema 压缩发生在 llm 层，只能靠 sessionId 反查。
+  const sessionWorkspaces = new Map<string, WorkspaceRef>()
+  const workspaceFor = (session: any, agent?: any): WorkspaceRef =>
+    workspaceRefFromSession(session, agent) ?? workspaceRef('(unknown)')
+
   logEvent('info', 'apply.start', { plugin: name, config })
 
   try {
@@ -335,6 +347,9 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         eventSavings: snapshot.eventSavings,
         contextReduction: snapshot.contextReduction,
         estimatedCostTokens: snapshot.estimatedCostTokens,
+        tokensBeforeTotal: snapshot.tokensBeforeTotal,
+        tokensAfterTotal: snapshot.tokensAfterTotal,
+        workspaceCount: Object.keys(snapshot.byWorkspace).length,
         schemaVersion: snapshot.schemaVersion,
         ledgerId: snapshot.ledgerId,
         revision: snapshot.revision,
@@ -357,8 +372,10 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     const dispose = installSchemaCompressor({ llm, get: () => undefined } as any, {
       enabled: true,
       maxDescriptionChars: 120,
-      onSavings: (tokens: number) => {
-        ledger.record('schema', tokens, 'tool schema descriptions')
+      onRequest: ({ sessionId, beforeTokens, afterTokens, savedTokens }) => {
+        const workspace = sessionWorkspaces.get(sessionId) ?? workspaceRef('(unknown)')
+        ledger.recordRequestTokens(workspace, beforeTokens, afterTokens)
+        if (savedTokens > 0) ledger.record('schema', savedTokens, 'tool schema descriptions', workspace)
         scheduleSavings()
       },
     })
@@ -402,13 +419,14 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       const content = decision.content ?? result?.content
       const text = flattenPlainText(content)
       if (text === undefined) return decision
+      const workspace = workspaceFor(exec?.agent?.session, exec?.agent)
 
       // 去重总线：同一输出第二次出现时只留指针（最常见的是重复跑测试/构建/目录列表）。
       const dedupKeyValue = dedupeKey(text)
       const dedupHit = dedup.hit(dedupKeyValue)
       if (dedupHit !== null && estimateTokens(text) > 100) {
         counters.deduped += 1
-        ledger.record('dedup', dedupHit.entry.tokens, 'duplicate tool output')
+        ledger.record('dedup', dedupHit.entry.tokens, 'duplicate tool output', workspace)
         scheduleSavings()
         logEvent('info', 'dedup.hit', {
           module: 'DedupBus',
@@ -473,7 +491,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
       if (saved > 0) {
         const module = extracted && extracted.safe && extracted.mode !== 'none' ? 'extraction' : 'admission'
-        ledger.record(module, saved, `${extracted?.mode ?? 'admission'} ${tokensBefore}->${tokensAfter}`)
+        ledger.record(module, saved, `${extracted?.mode ?? 'admission'} ${tokensBefore}->${tokensAfter}`, workspace)
         scheduleSavings()
       }
 
@@ -510,6 +528,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       if (entries.length === 0) return downstream
 
       const sessionId = String(session.id ?? 'unknown')
+      const workspace = workspaceFor(session, payload?.agent)
+      sessionWorkspaces.set(sessionId, workspace)
       const state = stateFor(sessionId)
       const tokens = entries.reduce((sum, entry) => sum + estimateTokens(entry.text), 0)
       const maxSeq = entries.reduce((max, entry) => (entry.seq > max ? entry.seq : max), 0)
@@ -623,8 +643,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       applyFoldToSurface(session, plan.patch, plan.summary, plan.foldedSeqs)
       state.folds += 1
       counters.folds += 1
-      ledger.record('fold', plan.tokensSaved, decision.patchId)
-      ledger.noteFold()
+      ledger.record('fold', plan.tokensSaved, decision.patchId, workspace)
+      ledger.noteFold(workspace)
       scheduleSavings()
 
       logEvent('info', 'memory.fold_applied', {

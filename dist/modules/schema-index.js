@@ -131,6 +131,26 @@ function selectStableToolSet(tools, prompt, options = {}) {
         hidden: tools.filter((tool) => !keptNames.has(String(tool.name ?? ''))).map((tool) => String(tool.name ?? '')),
     };
 }
+/** 粗略估算消息侧 token（4 字符/token），用于面板比例的分母。 */
+function estimateMessagesTokens(messages) {
+    if (!Array.isArray(messages))
+        return 0;
+    let chars = 0;
+    for (const message of messages) {
+        const content = message?.content;
+        if (typeof content === 'string') {
+            chars += content.length;
+            continue;
+        }
+        if (!Array.isArray(content))
+            continue;
+        for (const block of content) {
+            if (typeof block?.text === 'string')
+                chars += block.text.length;
+        }
+    }
+    return Math.ceil(chars / 4);
+}
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。
  * 失败安全：任何异常原样放行。
@@ -156,8 +176,17 @@ function installSchemaCompressor(ctx, options = {}) {
     let lastLogKey = '';
     const transform = (request) => {
         try {
-            if (!request || !Array.isArray(request.tools) || request.tools.length === 0)
+            const messagesTokens = estimateMessagesTokens(request?.messages);
+            if (!request || !Array.isArray(request.tools) || request.tools.length === 0) {
+                options.onRequest?.({
+                    sessionId: String(request?.sessionId ?? ''),
+                    beforeTokens: messagesTokens,
+                    afterTokens: messagesTokens,
+                    savedTokens: 0,
+                });
                 return request;
+            }
+            const toolsBeforeChars = JSON.stringify(request.tools).length;
             let tools = request.tools;
             let hidden = [];
             if (selectionEnabled) {
@@ -166,6 +195,12 @@ function installSchemaCompressor(ctx, options = {}) {
                 hidden = selected.hidden;
             }
             const compressed = compressToolSchemas(tools, maxChars);
+            options.onRequest?.({
+                sessionId: String(request.sessionId ?? ''),
+                beforeTokens: messagesTokens + Math.ceil(toolsBeforeChars / 4),
+                afterTokens: messagesTokens + Math.ceil(JSON.stringify(compressed.tools).length / 4),
+                savedTokens: compressed.stats.tokensSaved,
+            });
             if (compressed.stats.changed === 0 && hidden.length === 0)
                 return request;
             options.onSavings?.(compressed.stats.tokensSaved);

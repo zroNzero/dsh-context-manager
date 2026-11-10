@@ -79,6 +79,12 @@ flowchart LR
 - `totalSavedTokens` 是「prompt 中少发的 token 数」，不是账单；
   `estimatedCostTokens` 是缓存感知的估算（schema 按命中价 1/30，工具输出按未命中价 1）；
   `contextReduction`（fold）是一次性上下文缩减，单独展示。
+- **按工作区分账**：`byWorkspace[workspaceId]` 给出每个工作区的同类统计
+  （`workspace` 路径、`label`、各模块、`events`、`tokensBeforeTotal/AfterTotal`）。
+  `workspaceId` 是规范化绝对路径的稳定短 hash；顶层字段等于各工作区之和。
+- **比例分母**：`tokensBeforeTotal / tokensAfterTotal` 是每次请求 prompt token 的累计
+  （压缩前/后），消费方用 `1 - after/before` 算比例；当前只覆盖 schema 维度，
+  因此带 `tokensBeforeTotalEstimated: true`。
 
 ## 安装
 

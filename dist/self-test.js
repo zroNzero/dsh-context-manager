@@ -16,6 +16,7 @@ const extraction_1 = require("./modules/extraction");
 const memory_1 = require("./modules/memory");
 const host_sim_1 = require("./host-sim");
 const savings_ledger_1 = require("./modules/savings-ledger");
+const workspace_1 = require("./modules/workspace");
 const log_1 = require("./log");
 const outcomes = [];
 function check(name, fn) {
@@ -175,16 +176,24 @@ check('memory.savings-accounting', () => {
 // 7) 节省面板契约：ledgerId / revision / 缓存感知成本
 // ---------------------------------------------------------------------------
 check('savings.ledger-cost-model', () => {
+    const workspaceA = (0, workspace_1.workspaceRef)('D:\\PC\\dsh\\dsh-context-manager');
+    const workspaceB = (0, workspace_1.workspaceRef)('D:\\PC\\other');
+    assert(workspaceA.id === (0, workspace_1.workspaceRef)('d:/PC/dsh/dsh-context-manager/').id, 'workspace id must be stable across separators/case');
     const ledger = new savings_ledger_1.SavingsLedger();
-    ledger.record('schema', 2704, 'schema');
-    ledger.record('extraction', 100, 'output');
+    ledger.record('schema', 2704, 'schema', workspaceA);
+    ledger.record('extraction', 100, 'output', workspaceB);
+    ledger.recordRequestTokens(workspaceA, 10000, 8000);
+    ledger.recordRequestTokens(workspaceB, 5000, 2500);
     const snapshot = ledger.snapshot();
-    assert(snapshot.schemaVersion === 3, `schemaVersion=${snapshot.schemaVersion}`);
+    assert(snapshot.schemaVersion === 4, `schemaVersion=${snapshot.schemaVersion}`);
     assert(snapshot.ledgerId.length > 0, 'ledgerId required');
-    assert(snapshot.revision === 2, `revision=${snapshot.revision}`);
+    assert(Object.keys(snapshot.byWorkspace).length === 2, 'expected two workspaces');
     assert(snapshot.totalSavedTokens === 2804, `prompt tokens removed=${snapshot.totalSavedTokens}`);
     assert(snapshot.estimatedCostTokens === 190, `cost-aware estimate=${snapshot.estimatedCostTokens} (90 + 100)`);
-    assert(snapshot.contextReduction === 0, 'fold must stay separate from cost estimate');
+    assert(snapshot.tokensBeforeTotal === 15000 && snapshot.tokensAfterTotal === 10500, 'before/after totals');
+    const perWorkspace = snapshot.byWorkspace[workspaceA.id];
+    assert(perWorkspace.totalSavedTokens === 2704, 'workspace A total');
+    assert(perWorkspace.tokensBeforeTotal === 10000, 'workspace A before total');
 });
 // ---------------------------------------------------------------------------
 // 汇总

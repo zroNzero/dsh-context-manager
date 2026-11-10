@@ -53,6 +53,13 @@ export interface SchemaCompressorOptions {
     topK?: number;
     /** 每次压缩成功后回调节省的 token（用于 SavingsLedger）。 */
     onSavings?: (tokens: number) => void;
+    /** 每次请求回调 prompt token 的压缩前/后统计（用于面板比例）。 */
+    onRequest?: (event: {
+        sessionId: string;
+        beforeTokens: number;
+        afterTokens: number;
+        savedTokens: number;
+    }) => void;
 }
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。

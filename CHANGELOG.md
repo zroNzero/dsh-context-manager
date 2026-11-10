@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.0.9 — 2026-11-10
+
+### 面板契约 v4：按工作区分账 + 比例分母
+
+- `savings.json` 升级到 `schemaVersion: 4`，新增：
+  - `byWorkspace`：按会话工作区（稳定短 hash）分账，含路径、短名、各模块统计、
+    `tokensBeforeTotal/AfterTotal`；顶层字段保持为各工作区之和。
+  - `tokensBeforeTotal / tokensAfterTotal`：每次请求 prompt token 的压缩前/后累计，
+    供面板计算 `1 - after/before`；当前只覆盖 schema 维度，标记
+    `tokensBeforeTotalEstimated: true`。
+- 工作区识别使用会话 cwd（`session.cwd / header.cwd / ...`），不再依赖 `process.cwd()`；
+  `workspaceId` 对大小写、分隔符、尾斜杠不敏感，跨重启稳定。
+- 旧字段全部保留（`totalSavedTokens`、`byModule`、`perRequestSavings`、
+  `eventSavings`、`contextReduction`、`estimatedCostTokens`、`ledgerId`、`revision`）。
+- 回归测试：`savings.ledger-cost-model` 覆盖双工作区、稳定 id、before/after 累计。
+
 ## v1.0.8 — 2026-11-10
 
 ### 面板契约与计费口径

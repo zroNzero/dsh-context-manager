@@ -1,12 +1,16 @@
 /**
- * SavingsLedger —— Token 节省账本（面板数据源）。
+ * SavingsLedger —— Token 节省账本（面板数据源，schemaVersion 4）。
  *
- * 所有节省事件统一记账：Admission / Extraction / Dedup / Fold / Schema。
- * 运行期把快照写入 ./savings.json 与 ./savings.md，
- * 面板可以通过工具 costkiller_status 或直接查看 savings.md 获取。
+ * v4 新增（向后兼容，只加字段）：
+ * - byWorkspace：按会话工作区分账，workspaceId 是规范化路径的稳定短 hash；
+ * - tokensBeforeTotal / tokensAfterTotal：Σ 每次请求的 prompt token（压缩前/后），
+ *   供面板计算可靠比例；由于只覆盖 schema 压缩维度，标记 tokensBeforeTotalEstimated。
+ *
+ * 顶层字段始终等于各工作区之和；旧字段全部保留。
  */
 
 import { randomUUID } from 'node:crypto'
+import { workspaceRef, type WorkspaceRef } from './workspace'
 
 export type SavingsModule = 'admission' | 'extraction' | 'dedup' | 'fold' | 'schema'
 
@@ -15,10 +19,27 @@ export interface SavingsEvent {
   module: SavingsModule
   tokens: number
   detail: string
+  workspace?: string
+}
+
+export interface WorkspaceSavingsSnapshot {
+  workspace: string
+  label: string
+  totalSavedTokens: number
+  estimatedCostTokens: number
+  perRequestSavings: number
+  eventSavings: number
+  contextReduction: number
+  byModule: Record<SavingsModule, number>
+  events: number
+  folds: number
+  tokensBeforeTotal: number
+  tokensAfterTotal: number
+  updatedAt: string
 }
 
 export interface SavingsSnapshot {
-  schemaVersion: 3
+  schemaVersion: 4
   /** 每次插件 apply 生成的新账本 id；消费方看到新 id 必须「替换」而不是累加。 */
   ledgerId: string
   /** 同一账本内每次写盘递增，用于消费方去重。 */
@@ -28,14 +49,19 @@ export interface SavingsSnapshot {
   /** 兼容字段：所有模块的「prompt token 减少量」之和（不是账单）。 */
   totalSavedTokens: number
   byModule: Record<SavingsModule, number>
-  /** 按请求累计的节省（schema 每次请求都会生效）。 */
   perRequestSavings: number
-  /** 单次事件节省（admission / extraction / dedup）。 */
   eventSavings: number
-  /** 一次性上下文缩减（fold）：只计一次，后续请求持续受益但不重复累加。 */
   contextReduction: number
   /** 缓存感知的估算成本节省（单位：miss-token 等价）。 */
   estimatedCostTokens: number
+  /** Σ 每次请求「未压缩时的 prompt token」。 */
+  tokensBeforeTotal: number
+  /** Σ 每次请求「压缩后实际发送的 prompt token」。 */
+  tokensAfterTotal: number
+  /** 目前 before/after 只覆盖 schema 维度，按估算标注。 */
+  tokensBeforeTotalEstimated: true
+  /** 按工作区分账。 */
+  byWorkspace: Record<string, WorkspaceSavingsSnapshot>
   events: number
   folds: number
   rejectedByAnchor: number
@@ -43,84 +69,180 @@ export interface SavingsSnapshot {
 }
 
 const MAX_EVENTS = 20
-/** 与 CacheAnchor 同一套缓存经济学：命中价 1，未命中价 30。 */
 const CACHE_HIT_PRICE = 1
 const CACHE_MISS_PRICE = 30
+const UNKNOWN_WORKSPACE = workspaceRef('(unknown)')
+
+interface WorkspaceAgg {
+  ref: WorkspaceRef
+  byModule: Record<SavingsModule, number>
+  events: number
+  folds: number
+  tokensBefore: number
+  tokensAfter: number
+  updatedAt: number
+}
+
+function emptyModuleRecord(): Record<SavingsModule, number> {
+  return { admission: 0, extraction: 0, dedup: 0, fold: 0, schema: 0 }
+}
 
 export class SavingsLedger {
   private readonly ledgerId = randomUUID()
   private revision = 0
   private readonly startedAt = Date.now()
   private updatedAt = Date.now()
-  private readonly byModule: Record<SavingsModule, number> = {
-    admission: 0,
-    extraction: 0,
-    dedup: 0,
-    fold: 0,
-    schema: 0,
-  }
-  private eventCount = 0
-  private foldCount = 0
-  private rejected = 0
+  private readonly workspaces = new Map<string, WorkspaceAgg>()
   private readonly lastEvents: SavingsEvent[] = []
+  private rejected = 0
 
-  record(module: SavingsModule, tokens: number, detail = ''): void {
+  private aggFor(ref: WorkspaceRef): WorkspaceAgg {
+    let agg = this.workspaces.get(ref.id)
+    if (!agg) {
+      agg = {
+        ref,
+        byModule: emptyModuleRecord(),
+        events: 0,
+        folds: 0,
+        tokensBefore: 0,
+        tokensAfter: 0,
+        updatedAt: Date.now(),
+      }
+      this.workspaces.set(ref.id, agg)
+    }
+    return agg
+  }
+
+  record(module: SavingsModule, tokens: number, detail = '', workspace?: WorkspaceRef): void {
     const value = Math.max(0, Math.round(tokens))
     if (value <= 0) return
-    this.byModule[module] += value
-    this.eventCount += 1
+    const ref = workspace ?? UNKNOWN_WORKSPACE
+    const agg = this.aggFor(ref)
+    agg.byModule[module] += value
+    agg.events += 1
+    agg.updatedAt = Date.now()
     this.revision += 1
     this.updatedAt = Date.now()
-    this.lastEvents.push({ ts: new Date().toISOString(), module, tokens: value, detail })
+    this.lastEvents.push({ ts: new Date().toISOString(), module, tokens: value, detail, workspace: ref.label })
     if (this.lastEvents.length > MAX_EVENTS) this.lastEvents.shift()
   }
 
-  noteFold(): void {
-    this.foldCount += 1
+  /** 记录一次请求的 prompt token（压缩前/后）；只计统计，不产生“节省事件”。 */
+  recordRequestTokens(workspace: WorkspaceRef | undefined, beforeTokens: number, afterTokens: number): void {
+    const before = Math.max(0, Math.round(beforeTokens))
+    const after = Math.max(0, Math.min(before, Math.round(afterTokens)))
+    if (before <= 0 && after <= 0) return
+    const agg = this.aggFor(workspace ?? UNKNOWN_WORKSPACE)
+    agg.tokensBefore += before
+    agg.tokensAfter += after
+    agg.updatedAt = Date.now()
+    this.revision += 1
+    this.updatedAt = Date.now()
+  }
+
+  noteFold(workspace?: WorkspaceRef): void {
+    this.aggFor(workspace ?? UNKNOWN_WORKSPACE).folds += 1
+    this.revision += 1
   }
 
   noteRejected(): void {
     this.rejected += 1
+    this.revision += 1
   }
 
-  get total(): number {
-    return Object.values(this.byModule).reduce((sum, value) => sum + value, 0)
+  private totalSaved(): number {
+    let total = 0
+    for (const agg of this.workspaces.values()) {
+      for (const value of Object.values(agg.byModule)) total += value
+    }
+    return total
   }
 
   snapshot(): SavingsSnapshot {
-    const byModule = { ...this.byModule }
+    const byWorkspace: Record<string, WorkspaceSavingsSnapshot> = {}
+    const byModule = emptyModuleRecord()
+    let totalSavedTokens = 0
+    let events = 0
+    let folds = 0
+    let tokensBeforeTotal = 0
+    let tokensAfterTotal = 0
+
+    for (const [id, agg] of this.workspaces) {
+      const wsTotal = Object.values(agg.byModule).reduce((sum, value) => sum + value, 0)
+      const eventSavings = agg.byModule.admission + agg.byModule.extraction + agg.byModule.dedup
+      const estimatedCostTokens =
+        Math.round((agg.byModule.schema * CACHE_HIT_PRICE) / CACHE_MISS_PRICE) + eventSavings
+      byWorkspace[id] = {
+        workspace: agg.ref.path,
+        label: agg.ref.label,
+        totalSavedTokens: wsTotal,
+        estimatedCostTokens,
+        perRequestSavings: agg.byModule.schema,
+        eventSavings,
+        contextReduction: agg.byModule.fold,
+        byModule: { ...agg.byModule },
+        events: agg.events,
+        folds: agg.folds,
+        tokensBeforeTotal: agg.tokensBefore,
+        tokensAfterTotal: agg.tokensAfter,
+        updatedAt: new Date(agg.updatedAt).toISOString(),
+      }
+      totalSavedTokens += wsTotal
+      events += agg.events
+      folds += agg.folds
+      tokensBeforeTotal += agg.tokensBefore
+      tokensAfterTotal += agg.tokensAfter
+      for (const key of Object.keys(byModule) as SavingsModule[]) byModule[key] += agg.byModule[key]
+    }
+
     const eventSavings = byModule.admission + byModule.extraction + byModule.dedup
-    // schema 命中缓存前缀（价格 1/30），工具输出属于新 token（价格 1）。
-    const estimatedCostTokens = Math.round((byModule.schema * CACHE_HIT_PRICE) / CACHE_MISS_PRICE) + eventSavings
+    const estimatedCostTokens =
+      Math.round((byModule.schema * CACHE_HIT_PRICE) / CACHE_MISS_PRICE) + eventSavings
+
     return {
-      schemaVersion: 3,
+      schemaVersion: 4,
       ledgerId: this.ledgerId,
       revision: this.revision,
       startedAt: new Date(this.startedAt).toISOString(),
       updatedAt: new Date(this.updatedAt).toISOString(),
-      totalSavedTokens: this.total,
+      totalSavedTokens,
       byModule,
       perRequestSavings: byModule.schema,
       eventSavings,
       contextReduction: byModule.fold,
       estimatedCostTokens,
-      events: this.eventCount,
-      folds: this.foldCount,
+      tokensBeforeTotal,
+      tokensAfterTotal,
+      tokensBeforeTotalEstimated: true,
+      byWorkspace,
+      events,
+      folds,
       rejectedByAnchor: this.rejected,
       lastEvents: [...this.lastEvents],
     }
   }
 
-  /** Markdown 面板：按模块汇总 + 最近事件。 */
+  /** Markdown 面板：按模块汇总 + 按工作区 + 最近事件。 */
   renderMarkdown(): string {
     const snapshot = this.snapshot()
-    const rows = (Object.keys(snapshot.byModule) as SavingsModule[])
+    const moduleRows = (Object.keys(snapshot.byModule) as SavingsModule[])
       .map((key) => `| ${key} | ${snapshot.byModule[key]} |`)
+      .join('\n')
+    const workspaceRows = Object.values(snapshot.byWorkspace)
+      .map(
+        (workspace) =>
+          `| ${workspace.label} | ${workspace.totalSavedTokens} | ${workspace.estimatedCostTokens} | ${workspace.events} |`,
+      )
       .join('\n')
     const events = snapshot.lastEvents
       .slice(-10)
-      .map((event) => `| ${event.ts} | ${event.module} | ${event.tokens} | ${event.detail} |`)
+      .map((event) => `| ${event.ts} | ${event.workspace ?? '-'} | ${event.module} | ${event.tokens} | ${event.detail} |`)
       .join('\n')
+
+    const raito =
+      snapshot.tokensBeforeTotal > 0
+        ? `${((1 - snapshot.tokensAfterTotal / snapshot.tokensBeforeTotal) * 100).toFixed(2)}%`
+        : 'n/a'
 
     return [
       '# Token Savings',
@@ -133,24 +255,30 @@ export class SavingsLedger {
       `- 单次事件（admission/extraction/dedup）: ${snapshot.eventSavings}`,
       `- 一次性上下文缩减（fold）: ${snapshot.contextReduction}`,
       `- 缓存感知估算成本节省（miss-token 等价）: **${snapshot.estimatedCostTokens}**`,
+      `- tokens before/after: ${snapshot.tokensBeforeTotal} / ${snapshot.tokensAfterTotal}（压缩比 ${raito}，估算）`,
       `- events: ${snapshot.events} | folds: ${snapshot.folds} | rejected by CacheAnchor: ${snapshot.rejectedByAnchor}`,
       '',
       '> 口径说明：totalSavedTokens 是「prompt 中少发的 token 数」，不是账单。',
-      '> schema 位于缓存前缀（价格 1/30），extraction/admission/dedup 是新 token（价格 1），',
-      '> estimatedCostTokens 按此加权；fold 是一次性上下文缩减，单独展示。',
+      '> schema 位于缓存前缀（价格 1/30），extraction/admission/dedup 是新 token（价格 1）。',
       '> 消费方必须以 ledgerId 识别新账本：新 id 时必须「替换」而不是累加。',
       '',
       '## By module',
       '',
       '| module | tokens saved |',
       '|---|---:|',
-      rows,
+      moduleRows,
+      '',
+      '## By workspace',
+      '',
+      '| workspace | prompt tokens removed | est. cost | events |',
+      '|---|---:|---:|---:|',
+      workspaceRows || '| - | 0 | 0 | 0 |',
       '',
       '## Recent events',
       '',
-      '| time | module | tokens | detail |',
-      '|---|---|---:|---|',
-      events || '| - | - | 0 | (no events yet) |',
+      '| time | workspace | module | tokens | detail |',
+      '|---|---|---|---:|---|',
+      events || '| - | - | - | 0 | (no events yet) |',
       '',
     ].join('\n')
   }

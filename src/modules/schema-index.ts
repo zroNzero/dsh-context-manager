@@ -151,6 +151,26 @@ export interface SchemaCompressorOptions {
   topK?: number
   /** 每次压缩成功后回调节省的 token（用于 SavingsLedger）。 */
   onSavings?: (tokens: number) => void
+  /** 每次请求回调 prompt token 的压缩前/后统计（用于面板比例）。 */
+  onRequest?: (event: { sessionId: string; beforeTokens: number; afterTokens: number; savedTokens: number }) => void
+}
+
+/** 粗略估算消息侧 token（4 字符/token），用于面板比例的分母。 */
+function estimateMessagesTokens(messages: any): number {
+  if (!Array.isArray(messages)) return 0
+  let chars = 0
+  for (const message of messages) {
+    const content = (message as any)?.content
+    if (typeof content === 'string') {
+      chars += content.length
+      continue
+    }
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (typeof (block as any)?.text === 'string') chars += (block as any).text.length
+    }
+  }
+  return Math.ceil(chars / 4)
 }
 
 /**
@@ -179,7 +199,18 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
 
   const transform = (request: any): any => {
     try {
-      if (!request || !Array.isArray(request.tools) || request.tools.length === 0) return request
+      const messagesTokens = estimateMessagesTokens(request?.messages)
+      if (!request || !Array.isArray(request.tools) || request.tools.length === 0) {
+        options.onRequest?.({
+          sessionId: String(request?.sessionId ?? ''),
+          beforeTokens: messagesTokens,
+          afterTokens: messagesTokens,
+          savedTokens: 0,
+        })
+        return request
+      }
+
+      const toolsBeforeChars = JSON.stringify(request.tools).length
 
       let tools = request.tools as ToolSchemaLike[]
       let hidden: string[] = []
@@ -190,6 +221,12 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
       }
 
       const compressed = compressToolSchemas(tools, maxChars)
+      options.onRequest?.({
+        sessionId: String(request.sessionId ?? ''),
+        beforeTokens: messagesTokens + Math.ceil(toolsBeforeChars / 4),
+        afterTokens: messagesTokens + Math.ceil(JSON.stringify(compressed.tools).length / 4),
+        savedTokens: compressed.stats.tokensSaved,
+      })
       if (compressed.stats.changed === 0 && hidden.length === 0) return request
       options.onSavings?.(compressed.stats.tokensSaved)
 
