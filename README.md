@@ -1,4 +1,4 @@
-# CostKillerOrchestrator
+# dsh-context-manager (CostKillerOrchestrator)
 
 DSH 插件：面向长上下文 / 多轮次 / 多工具 Agent 的**缓存对齐上下文治理系统**。
 目标是在不降智的前提下，把工具输出、历史轨迹、工具 Schema 三类 Token 开销同时压下来，并用
@@ -60,6 +60,17 @@ flowchart LR
 > 数据来自仓库内 `demo.ts` 的合成负载，属于上界；真实长会话的保守区间约 **35%–55%**，
 > 取决于工具输出结构、MCP 工具数量与压缩触发频率。
 
+## 节省面板
+
+插件运行时会持续写入两份面板文件（相对 DSH 进程工作目录，通常是 profile 目录）：
+
+- `savings.md` —— 人类可读的 Markdown 面板（总量 / 分模块 / 最近事件）
+- `savings.json` —— 机器可读快照
+
+也可以在对话里让 Agent 调用工具 `costkiller_status`，返回同一份数据（含
+`savedByAdmission / savedByExtraction / savedByDedup / savedByFold / savedBySchema`
+与 `savingsFile` 路径）。
+
 ## 安装
 
 ```powershell
@@ -73,8 +84,8 @@ dsh install D:\path\to\dsh-context-manager
 
 ```yaml
 - insert:
-    - id: cost-killer-orchestrator
-      name: cost-killer-orchestrator
+    - id: dsh-context-manager
+      name: dsh-context-manager
       config:
         maxInputTokens: 100000
         foldAtRatio: 0.6

@@ -1,7 +1,7 @@
 {
-  "name": "cost-killer-orchestrator",
-  "version": "1.0.4",
-  "description": "CostKillerOrchestrator: cache-aligned context governance for DSH (Admission / Extraction / Memory / CacheAnchor / Routing / SchemaIndex / DedupBus)",
+  "name": "dsh-context-manager",
+  "version": "1.0.5",
+  "description": "dsh-context-manager (CostKillerOrchestrator): cache-aligned context governance for DSH (Admission / Extraction / Memory / CacheAnchor / Routing / SchemaIndex / DedupBus)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

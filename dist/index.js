@@ -48,6 +48,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.Config = exports.inject = exports.name = void 0;
 exports.apply = apply;
 const zod_1 = require("zod");
+const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
 const contracts_1 = require("./contracts");
 const cacheAnchor_1 = require("./cacheAnchor");
@@ -60,7 +61,8 @@ const spill_gc_1 = require("./modules/spill-gc");
 const schema_index_1 = require("./modules/schema-index");
 const breaker_1 = require("./modules/breaker");
 const dedup_bus_1 = require("./modules/dedup-bus");
-exports.name = 'cost-killer-orchestrator';
+const savings_ledger_1 = require("./modules/savings-ledger");
+exports.name = 'dsh-context-manager';
 exports.inject = ['systemPrompt', 'tools', 'sessions', 'agents'];
 exports.Config = zod_1.z.object({
     maxInputTokens: zod_1.z.number().int().positive().default(100000),
@@ -165,72 +167,13 @@ function collectEntries(session) {
     return entries;
 }
 /**
- * 折叠区间必须覆盖完整的 tool-call 组。
- *
- * surface replacement 以 [startSeq, endSeq] 为粒度，而 provider 要求
- * 「assistant(tool_calls) 之后必须紧跟全部 tool 结果」。如果区间起点落在
- * 一个 tool/result 上，它所属的 assistant/message 会留在可见面且永远等不到
- * 结果，DeepSeek 会直接返回 "Messages tool calls need immediate results"。
- * 这里把区间向外扩：向前吃掉发起工具调用的 assistant 消息，向后吃掉同一个
- * 工具组的残留调用/结果事件；遇到 user 消息或 step/turn 边界立即停止。
- */
-function widenFoldRange(session, seqs) {
-    const start = seqs[0];
-    const end = seqs[seqs.length - 1];
-    const nodes = Array.from(session?.surface?.nodes ?? []);
-    if (nodes.length === 0)
-        return { start, end };
-    const eventAt = (seq) => {
-        try {
-            return session.eventAt?.(seq);
-        }
-        catch {
-            return undefined;
-        }
-    };
-    const typeOf = (seq) => String(eventAt(seq)?.type ?? '');
-    const hasToolCall = (seq) => {
-        const parts = eventAt(seq)?.data?.message?.content;
-        return Array.isArray(parts) && parts.some((part) => part?.type === 'tool-call');
-    };
-    let startSeq = start;
-    let endSeq = end;
-    const startIndex = nodes.indexOf(start);
-    for (let i = startIndex - 1; startIndex > 0 && i >= 0; i -= 1) {
-        const type = typeOf(nodes[i]);
-        if (type === 'user/message' || type === 'turn/start')
-            break;
-        if (type === 'assistant/message') {
-            if (hasToolCall(nodes[i]))
-                startSeq = nodes[i];
-            break;
-        }
-    }
-    const endIndex = nodes.indexOf(end);
-    const trailing = new Set([
-        'tool/result',
-        'tool/call',
-        'job/registered',
-        'job/settled',
-        'approval/asked',
-        'approval/decided',
-        'step/end',
-    ]);
-    for (let i = endIndex + 1; endIndex >= 0 && i < nodes.length; i += 1) {
-        if (!trailing.has(typeOf(nodes[i])))
-            break;
-        endSeq = nodes[i];
-    }
-    return { start: startSeq, end: endSeq };
-}
-/**
  * 计算 surface replacement 需要声明遮蔽的节点集合。
  *
  * DSH 的会话加载器会校验：「被替换区间内每一个有消息的 surface 节点，都必须
  * 出现在 sourceEventSeqs 里」，否则整份日志被判为 corrupt
  * （SessionFormatError: replacement sourceEventSeqs omit a shadowed surface node）。
- * 区间被 widenFoldRange 扩宽后，起点/终点可能多出 assistant 消息或工具结果，
- * 因此这里按事件真实类型重新收集，而不是沿用折叠计划里的原始 seqs。
+ * 折叠计划只含纯文本 assistant 消息，区间内仍可能夹着其它可投影节点，
+ * 因此这里按事件真实类型重新收集，而不是沿用计划里的原始 seqs。
  */
 function shadowedFoldSeqs(session, startSeq, endSeq, planned) {
     const nodes = Array.from(session?.surface?.nodes ?? []);
@@ -253,7 +196,8 @@ function shadowedFoldSeqs(session, startSeq, endSeq, planned) {
 function applyFoldToSurface(session, patch, summary, seqs) {
     if (seqs.length === 0)
         return false;
-    const range = widenFoldRange(session, seqs);
+    const startSeq = seqs[0];
+    const endSeq = seqs[seqs.length - 1];
     const message = {
         id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         role: 'user',
@@ -261,15 +205,15 @@ function applyFoldToSurface(session, patch, summary, seqs) {
         source: { kind: 'user' },
     };
     session.append('user/message', message, {
-        surfaceOp: { op: 'replace', startSeq: range.start, endSeq: range.end },
-        sourceEventSeqs: shadowedFoldSeqs(session, range.start, range.end, seqs),
+        surfaceOp: { op: 'replace', startSeq, endSeq },
+        sourceEventSeqs: shadowedFoldSeqs(session, startSeq, endSeq, seqs),
     });
     return true;
 }
 function buildStatusTool(getStatus) {
     return {
         name: 'costkiller_status',
-        description: 'Return CostKillerOrchestrator runtime counters (admitted outputs, folds, saved tokens).',
+        description: 'Return dsh-context-manager token savings and runtime counters (savings panel data).',
         parameters: {},
         output: {
             schema: {
@@ -282,8 +226,28 @@ function buildStatusTool(getStatus) {
                     savedTokens: { type: 'number' },
                     rejectedByAnchor: { type: 'number' },
                     deduped: { type: 'number' },
+                    savedByAdmission: { type: 'number' },
+                    savedByExtraction: { type: 'number' },
+                    savedByDedup: { type: 'number' },
+                    savedByFold: { type: 'number' },
+                    savedBySchema: { type: 'number' },
+                    savingsFile: { type: 'string' },
                 },
-                required: ['ok', 'admitted', 'extracted', 'folds', 'savedTokens', 'rejectedByAnchor', 'deduped'],
+                required: [
+                    'ok',
+                    'admitted',
+                    'extracted',
+                    'folds',
+                    'savedTokens',
+                    'rejectedByAnchor',
+                    'deduped',
+                    'savedByAdmission',
+                    'savedByExtraction',
+                    'savedByDedup',
+                    'savedByFold',
+                    'savedBySchema',
+                    'savingsFile',
+                ],
                 additionalProperties: false,
             },
             render: (value) => [{ type: 'text', text: JSON.stringify(value) }],
@@ -309,6 +273,27 @@ function apply(ctx, rawConfig = {}) {
     const router = new routing_1.RoutingModule();
     const breaker = new breaker_1.CompressionBreaker({ name: 'extraction', failureThreshold: 3, cooldownMs: 10 * 60_000 });
     const dedup = new dedup_bus_1.DedupBus(256);
+    const ledger = new savings_ledger_1.SavingsLedger();
+    const savingsMarkdown = path.resolve(process.cwd(), 'savings.md');
+    const savingsJson = path.resolve(process.cwd(), 'savings.json');
+    let savingsTimer = null;
+    const persistSavings = () => {
+        try {
+            fs.writeFileSync(savingsJson, JSON.stringify(ledger.snapshot(), null, 2), 'utf8');
+            fs.writeFileSync(savingsMarkdown, ledger.renderMarkdown(), 'utf8');
+        }
+        catch {
+            /* 面板写盘失败不影响主链路 */
+        }
+    };
+    const scheduleSavings = () => {
+        if (savingsTimer !== null)
+            return;
+        savingsTimer = setTimeout(() => {
+            savingsTimer = null;
+            persistSavings();
+        }, 800);
+    };
     const stateFor = (sessionId) => {
         let state = sessions.get(sessionId);
         if (!state) {
@@ -331,47 +316,82 @@ function apply(ctx, rawConfig = {}) {
         (0, log_1.logEvent)('warn', 'systemPrompt.section.failed', { error: String(error) });
     }
     try {
-        const toolDisposer = services.tools?.register?.(buildStatusTool(() => ({
-            ok: true,
-            admitted: counters.admitted,
-            extracted: counters.extracted,
-            folds: counters.folds,
-            savedTokens: counters.savedTokens,
-            rejectedByAnchor: counters.rejectedByAnchor,
-            deduped: counters.deduped,
-        })));
+        const toolDisposer = services.tools?.register?.(buildStatusTool(() => {
+            const snapshot = ledger.snapshot();
+            return {
+                ok: true,
+                admitted: counters.admitted,
+                extracted: counters.extracted,
+                folds: counters.folds,
+                savedTokens: snapshot.totalSavedTokens,
+                rejectedByAnchor: counters.rejectedByAnchor,
+                deduped: counters.deduped,
+                savedByAdmission: snapshot.byModule.admission,
+                savedByExtraction: snapshot.byModule.extraction,
+                savedByDedup: snapshot.byModule.dedup,
+                savedByFold: snapshot.byModule.fold,
+                savedBySchema: snapshot.byModule.schema,
+                savingsFile: savingsMarkdown,
+            };
+        }));
         if (typeof toolDisposer === 'function')
             disposers.push(toolDisposer);
     }
     catch (error) {
         (0, log_1.logEvent)('warn', 'tools.register.failed', { error: String(error) });
     }
-    // Schema 压缩依赖 llm 服务。真实 DSH 里插件可能先于 llm 服务就绪，
-    // 因此延迟安装并重试（500ms × 20），避免静默失效。
+    // Schema 压缩依赖 llm 服务。真实 DSH 里 llm 可能挂在 agent 作用域而非 profile 根，
+    // 因此既在根 ctx 上重试，也在首条 pre-step 的 payload.agent.loopCtx.llm 上补装。
     const pendingTimers = [];
-    const tryInstallSchema = (attempt = 0) => {
-        let llm;
+    let schemaDisposer = null;
+    const installSchema = (llm, source) => {
+        if (schemaDisposer !== null)
+            return true;
+        if (!llm || typeof llm.stream !== 'function')
+            return false;
+        const dispose = (0, schema_index_1.installSchemaCompressor)({ llm, get: () => undefined }, {
+            enabled: true,
+            maxDescriptionChars: 120,
+            onSavings: (tokens) => {
+                ledger.record('schema', tokens, 'tool schema descriptions');
+                scheduleSavings();
+            },
+        });
+        if (typeof dispose !== 'function')
+            return false;
+        schemaDisposer = dispose;
+        disposers.push(dispose);
+        (0, log_1.logEvent)('info', 'schema.installed', { source });
+        return true;
+    };
+    const resolveRootLlm = () => {
         try {
-            llm = services.llm ?? services.get?.('llm');
+            return services.llm ?? services.get?.('llm');
         }
         catch {
-            llm = undefined;
+            return undefined;
         }
-        if (llm && typeof llm.stream === 'function') {
-            const dispose = (0, schema_index_1.installSchemaCompressor)(services, { enabled: true, maxDescriptionChars: 120 });
-            if (typeof dispose === 'function')
-                disposers.push(dispose);
-            (0, log_1.logEvent)('info', 'schema.installed', { attempt });
+    };
+    const tryInstallSchema = (attempt = 0) => {
+        if (schemaDisposer !== null)
             return;
-        }
-        if (attempt >= 20) {
-            (0, log_1.logEvent)('warn', 'schema.unavailable', { attempts: attempt });
+        if (installSchema(resolveRootLlm(), 'root'))
+            return;
+        if (attempt >= 40) {
+            (0, log_1.logEvent)('warn', 'schema.unavailable', { attempts: attempt, hint: 'llm service not found on root ctx' });
             return;
         }
         const timer = setTimeout(() => tryInstallSchema(attempt + 1), 500);
         pendingTimers.push(timer);
     };
     tryInstallSchema();
+    const installSchemaFromAgent = (agent) => {
+        if (schemaDisposer !== null || !agent)
+            return;
+        const llm = agent?.loopCtx?.llm ?? agent?.llm ?? agent?.ctx?.llm;
+        if (llm)
+            installSchema(llm, 'agent');
+    };
     const onPostExecute = async (exec, result, next) => {
         const decision = await next();
         try {
@@ -386,6 +406,8 @@ function apply(ctx, rawConfig = {}) {
             const dedupHit = dedup.hit(dedupKeyValue);
             if (dedupHit !== null && (0, contracts_1.estimateTokens)(text) > 100) {
                 counters.deduped += 1;
+                ledger.record('dedup', dedupHit.entry.tokens, 'duplicate tool output');
+                scheduleSavings();
                 (0, log_1.logEvent)('info', 'dedup.hit', {
                     module: 'DedupBus',
                     tokensSaved: dedupHit.entry.tokens,
@@ -444,6 +466,11 @@ function apply(ctx, rawConfig = {}) {
             const tokensAfter = (0, contracts_1.estimateTokens)(finalText);
             const saved = Math.max(0, tokensBefore - tokensAfter);
             counters.savedTokens += saved;
+            if (saved > 0) {
+                const module = extracted && extracted.safe && extracted.mode !== 'none' ? 'extraction' : 'admission';
+                ledger.record(module, saved, `${extracted?.mode ?? 'admission'} ${tokensBefore}->${tokensAfter}`);
+                scheduleSavings();
+            }
             (0, log_1.logEvent)('info', 'pipeline.tool_output', {
                 module: 'Orchestrator',
                 tool: exec?.tool?.name ?? exec?.name ?? 'unknown',
@@ -470,6 +497,7 @@ function apply(ctx, rawConfig = {}) {
         try {
             if (!downstream || downstream.kind === 'reject')
                 return downstream;
+            installSchemaFromAgent(payload?.agent);
             const session = payload?.agent?.session;
             if (!session || typeof session.deriveMessages !== 'function')
                 return downstream;
@@ -563,6 +591,7 @@ function apply(ctx, rawConfig = {}) {
             });
             if (!decision.approved) {
                 counters.rejectedByAnchor += 1;
+                ledger.noteRejected();
                 return downstream;
             }
             const envelope = (0, contracts_1.createEnvelope)({
@@ -580,6 +609,9 @@ function apply(ctx, rawConfig = {}) {
             applyFoldToSurface(session, plan.patch, plan.summary, plan.foldedSeqs);
             state.folds += 1;
             counters.folds += 1;
+            ledger.record('fold', plan.tokensSaved, decision.patchId);
+            ledger.noteFold();
+            scheduleSavings();
             (0, log_1.logEvent)('info', 'memory.fold_applied', {
                 sessionId,
                 folds: state.folds,
@@ -614,6 +646,10 @@ function apply(ctx, rawConfig = {}) {
     (0, log_1.logEvent)('info', 'apply.ready', { plugin: exports.name, mode: 'full', routing: router.circuitOpen ? 'open' : 'closed' });
     return () => {
         (0, log_1.logEvent)('info', 'apply.dispose', { plugin: exports.name });
+        if (savingsTimer !== null)
+            clearTimeout(savingsTimer);
+        savingsTimer = null;
+        persistSavings();
         for (const timer of pendingTimers)
             clearTimeout(timer);
         pendingTimers.length = 0;

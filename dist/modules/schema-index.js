@@ -168,6 +168,7 @@ function installSchemaCompressor(ctx, options = {}) {
             const compressed = compressToolSchemas(tools, maxChars);
             if (compressed.stats.changed === 0 && hidden.length === 0)
                 return request;
+            options.onSavings?.(compressed.stats.tokensSaved);
             const logKey = `${request.sessionId ?? 'unknown'}:${compressed.stats.charsAfter}:${hidden.length}`;
             if (logKey !== lastLogKey) {
                 lastLogKey = logKey;

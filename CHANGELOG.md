@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.0.5 — 2026-11-10
+
+### 变更
+
+- **插件更名**：包名与插件标识统一为 `dsh-context-manager`（与仓库同名），
+  `cordis.patch.yml`、`name` 导出、文档同步更新。
+- **Token 节省面板**：新增 `SavingsLedger`，按 Admission / Extraction / Dedup /
+  Fold / Schema 归类记账；运行期写 `savings.md` + `savings.json`，
+  `costkiller_status` 工具返回同一份快照（含分模块节省与面板路径）。
+- **折叠区间安全修复**：删除 `widenFoldRange`。该函数会在替换前把区间向前扩到
+  「带 tool-call 的 assistant」，绕过 v1.0.4 的候选守卫，可能重新制造孤儿
+  tool/call（即 v1.0.4 修复的那类事故）。现在折叠区间严格等于计划中的纯文本
+  消息；新增回归测试 `fold range never widens into tool-call messages`。
+- **Schema 压缩在真实宿主生效**：DSH 的 `llm` 服务挂在 agent 作用域，profile 根
+  的 `ctx.get('llm')` 永远为空（日志 `schema.unavailable`）。现在同时从首条
+  `agent/pre-step` 的 `payload.agent.loopCtx.llm` 补装，并新增
+  `schema installs from agent-scope llm` 回归测试。
+
 ## v1.0.4 — 2026-11-10
 
 ### 事故修复：折叠导致 `INVALID_REQUEST`

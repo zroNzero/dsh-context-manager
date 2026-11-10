@@ -51,6 +51,8 @@ export interface SchemaCompressorOptions {
     /** 实验：固定工具子集，默认 false。 */
     selectionEnabled?: boolean;
     topK?: number;
+    /** 每次压缩成功后回调节省的 token（用于 SavingsLedger）。 */
+    onSavings?: (tokens: number) => void;
 }
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。

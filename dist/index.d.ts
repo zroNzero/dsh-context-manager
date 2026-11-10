@@ -12,7 +12,7 @@
  */
 import { z } from 'zod';
 import type { Context } from '@deepseek-ai/cordis';
-export declare const name = "cost-killer-orchestrator";
+export declare const name = "dsh-context-manager";
 export declare const inject: string[];
 export declare const Config: z.ZodPrefault<z.ZodObject<{
     maxInputTokens: z.ZodDefault<z.ZodNumber>;

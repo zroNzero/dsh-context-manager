@@ -97,7 +97,7 @@ const cfg = {
 };
 async function main() {
     await check('exports contract', () => {
-        assert(index_1.name === 'cost-killer-orchestrator', `name=${index_1.name}`);
+        assert(index_1.name === 'dsh-context-manager', `name=${index_1.name}`);
         assert(Array.isArray(index_1.inject) && index_1.inject.length === 4, 'inject must declare 4 services');
         assert(typeof index_1.apply === 'function', 'apply missing');
         const parsed = index_1.Config.parse({});
@@ -172,6 +172,39 @@ async function main() {
         const description = String(captured2[0].tools[0].description ?? '');
         assert(description.length <= 121, `deferred install did not patch stream (len=${description.length})`);
         dispose2();
+    });
+    await check('schema installs from agent-scope llm', async () => {
+        const agentHooks = new Map();
+        const ctx3 = {
+            systemPrompt: { section: () => () => { } },
+            tools: { register: () => () => { } },
+            on: (event, fn) => {
+                agentHooks.set(event, fn);
+                return () => { };
+            },
+        };
+        const dispose3 = (0, index_1.apply)(ctx3, cfg);
+        const captured3 = [];
+        const fakeLlm = {
+            stream(request) {
+                captured3.push(request);
+                return (async function* () { })();
+            },
+        };
+        const session = new FakeSession();
+        session.id = 'verify-agent-llm';
+        session.add('user/message', { role: 'user', content: [{ type: 'text', text: '你好' }] });
+        const pre = agentHooks.get('agent/pre-step');
+        await pre({ agent: { session, model: 'm', loopCtx: { llm: fakeLlm } }, turn: 1, step: 1, messages: [] }, async () => ({ kind: 'enter', messages: [] }));
+        const longTools = Array.from({ length: 10 }, (_, index) => ({
+            name: `agent_tool_${index}`,
+            description: 'agent scoped long description '.repeat(30),
+            parameters: { type: 'object', properties: {} },
+        }));
+        fakeLlm.stream({ provider: 'p', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: '分析' }] }], tools: longTools });
+        assert(captured3.length === 1, 'agent-scope llm stream was not captured');
+        assert(String(captured3[0].tools[0].description ?? '').length <= 121, 'agent-scope schema install did not patch stream');
+        dispose3();
     });
     await check('tool output compressed with recoverable pointer', async () => {
         const post = hooks.get('tools/post-execute');
@@ -255,6 +288,41 @@ async function main() {
         const before = session.appended.length;
         await pre({ agent: { session, model: 'm' }, turn: 1, step: 1, messages: [] }, async () => ({ kind: 'enter', messages: [] }));
         assert(session.appended.length === before, 'tool-call history must never be folded end-to-end');
+    });
+    await check('fold range never widens into tool-call messages', async () => {
+        const session = new FakeSession();
+        session.id = 'verify-widen';
+        session.add('user/message', { role: 'user', content: [{ type: 'text', text: '需求：修复 bug' }] });
+        const toolCallSeq = session.add('assistant/message', {
+            role: 'assistant',
+            content: [
+                { type: 'tool-call', callId: 'call_widen_1' },
+                { type: 'text', text: 'x'.repeat(300) },
+            ],
+        });
+        session.add('tool/result', {
+            role: 'tool',
+            toolCallId: 'call_widen_1',
+            content: [{ type: 'text', text: 'y'.repeat(300) }],
+        });
+        let firstTextSeq = -1;
+        for (let index = 0; index < 10; index += 1) {
+            const seq = session.add('assistant/message', {
+                role: 'assistant',
+                content: [{ type: 'text', text: `决定采用方案 ${index}：${'z'.repeat(600)}` }],
+            });
+            if (firstTextSeq < 0)
+                firstTextSeq = seq;
+        }
+        session.add('assistant/message', { role: 'assistant', content: [{ type: 'text', text: '结论：完成' }] });
+        const pre = hooks.get('agent/pre-step');
+        const before = session.appended.length;
+        await pre({ agent: { session, model: 'm' }, turn: 1, step: 1, messages: [] }, async () => ({ kind: 'enter', messages: [] }));
+        assert(session.appended.length > before, 'expected a fold to be applied for text-only history');
+        const append = session.appended[session.appended.length - 1];
+        const startSeq = append?.opts?.surfaceOp?.startSeq;
+        assert(startSeq === firstTextSeq, `fold must start at first text message (${firstTextSeq}), got ${startSeq}`);
+        assert(startSeq !== toolCallSeq, 'fold must never widen into the tool-call assistant');
     });
     await check('no console.log in sources', () => {
         const dir = node_path_1.default.resolve('src');

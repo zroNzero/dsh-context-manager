@@ -1,3 +1,3 @@
 - insert:
-    - id: cost-killer-orchestrator
-      name: cost-killer-orchestrator
+    - id: dsh-context-manager
+      name: dsh-context-manager

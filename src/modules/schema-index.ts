@@ -149,6 +149,8 @@ export interface SchemaCompressorOptions {
   /** 实验：固定工具子集，默认 false。 */
   selectionEnabled?: boolean
   topK?: number
+  /** 每次压缩成功后回调节省的 token（用于 SavingsLedger）。 */
+  onSavings?: (tokens: number) => void
 }
 
 /**
@@ -189,6 +191,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
 
       const compressed = compressToolSchemas(tools, maxChars)
       if (compressed.stats.changed === 0 && hidden.length === 0) return request
+      options.onSavings?.(compressed.stats.tokensSaved)
 
       const logKey = `${request.sessionId ?? 'unknown'}:${compressed.stats.charsAfter}:${hidden.length}`
       if (logKey !== lastLogKey) {
