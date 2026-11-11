@@ -619,6 +619,48 @@ check('rewrite.leaves-thinking-messages-untouched', () => {
   }
 })
 
+// ---------------------------------------------------------------------------
+// 14) effort 杠杆要进真实账本：按校准比例把「只用了 high」折算成反事实输出成本
+// ---------------------------------------------------------------------------
+
+check('billing.effort-counterfactual', () => {
+  const ledger = new BillingLedger()
+  const rec = ledger.record({
+    at: Date.UTC(2026, 10, 11, 12, 0, 0),
+    model: 'deepseek-flash',
+    usage: { inputTokens: 100, cacheReadTokens: 0, outputTokens: 344 },
+    beforeChars: 1000,
+    afterChars: 1000,
+    effort: 'high',
+    baselineEffort: 'max',
+  })!
+  // 校准：high 的相对输出量 0.566 -> 反事实输出 344 / 0.566 ≈ 608
+  assert(rec.avoidedOutputTokens === 264, `avoided=${rec.avoidedOutputTokens}`)
+  const extra = (rec.counterfactualCost - rec.actualCost) * 1e6
+  assert(Math.abs(extra - 264 * 4) < 1e-6, `counterfactual must add the avoided output at the output price, extra=${extra}`)
+
+  // 同档位不产生 effort 收益
+  const same = ledger.record({
+    at: Date.UTC(2026, 10, 11, 12, 0, 0),
+    model: 'deepseek-flash',
+    usage: { inputTokens: 100, outputTokens: 344 },
+    beforeChars: 1000,
+    afterChars: 1000,
+    effort: 'max',
+    baselineEffort: 'max',
+  })!
+  assert(same.avoidedOutputTokens === 0, 'same effort must not claim a saving')
+  // 没有 effort 信息时也不能凭空折算
+  const unknown = ledger.record({
+    at: Date.UTC(2026, 10, 11, 12, 0, 0),
+    model: 'deepseek-flash',
+    usage: { inputTokens: 100, outputTokens: 344 },
+    beforeChars: 1000,
+    afterChars: 1000,
+  })!
+  assert(unknown.avoidedOutputTokens === 0, 'missing effort must not invent a counterfactual')
+})
+
 const failed = outcomes.filter((item) => !item.ok)
 for (const item of outcomes) {
   process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'} ${item.name} :: ${item.detail}\n`)

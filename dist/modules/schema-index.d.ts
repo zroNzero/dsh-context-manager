@@ -144,7 +144,15 @@ export interface SchemaCompressorOptions {
         };
         beforeChars: number;
         afterChars: number;
+        /** 本次调用实际使用的 effort 与用户基准档位（供账本折算 effort 杠杆）。 */
+        effort?: string;
+        baselineEffort?: string;
     }) => void;
+    /** 读取最近一次 effort 决策，供 onUsage 记账使用。 */
+    effortContext?: () => {
+        effort?: string;
+        baseline?: string;
+    } | null;
 }
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。

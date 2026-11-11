@@ -429,6 +429,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   const sessionWorkspaces = new Map<string, WorkspaceRef>()
   /** 最近一次 pre-step 的观测信号，供 prepareCall 前判定 reasoning effort。 */
   let effortContext: { userText: string; lastRole: string; toolErrored: boolean } | null = null
+  /** 最近一次 effort 决策（供真实账本把 effort 杠杆折算成反事实成本）。 */
+  let lastEffort: { effort: string; baseline: string; at: number } | null = null
   /**
    * 用户配置的 reasoning effort —— 只作为「不得超越」的上限。
    * 不能拿上游传进来的 reasoningEffort 当上限：宿主会把我们上一轮写进 config 的
@@ -676,6 +678,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
             escalateOnError: config.effortEscalateOnError,
           },
         })
+        lastEffort = { effort: String(decision.effort), baseline: String(baseline.effort ?? 'max'), at: Date.now() }
         if (!decision.effort || decision.effort === decision.requested) return controls
         logEvent('info', 'effort.decided', {
           module: 'EffortPolicy',
@@ -707,6 +710,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
             escalateOnError: config.effortEscalateOnError,
           },
         })
+        lastEffort = { effort: String(decision.effort), baseline: String(baseline.effort ?? 'max'), at: Date.now() }
         if (decision.effort === decision.requested) return null
         logEvent('info', 'effort.decided', {
           module: 'EffortPolicy',
@@ -731,8 +735,9 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       onOutputTruncated: (reason: string) =>
         logEvent('info', 'output.truncated', { module: 'OutputGuard', reason, maxTokens: config.outputMaxTokens }),
       toolAttention: { enabled: config.toolAttentionEnabled, topK: config.toolAttentionTopK },
-      onUsage: ({ purpose, model, usage, beforeChars, afterChars }) => {
-        const record = billing.record({ purpose, model, usage, beforeChars, afterChars })
+      effortContext: () => (lastEffort && Date.now() - lastEffort.at < 5000 ? { effort: lastEffort.effort, baseline: lastEffort.baseline } : null),
+      onUsage: ({ purpose, model, usage, beforeChars, afterChars, effort, baselineEffort }) => {
+        const record = billing.record({ purpose, model, usage, beforeChars, afterChars, effort, baselineEffort })
         if (record) logEvent('debug', 'billing.recorded', {
           module: 'Billing',
           purpose: record.purpose,

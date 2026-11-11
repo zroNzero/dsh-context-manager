@@ -18,6 +18,19 @@
  * 输出 token 一律不虚报收益：客户端截断是否真让 provider 少 decode 仍需实盘验证
  * （见 README「已知卡点 2」），所以只以 `unverifiedOutputTokens` 单独列示，不计入降幅。
  */
+/**
+ * 各 reasoning effort 档位的**相对输出量**（以 max 为 1.0）。
+ *
+ * 来源：2026-11-11 的配对校准（同 3 条 prompt × 4 档，真实调用）：
+ *   max 608 token / high 344 / low 357 / off 96
+ * 折算：high 0.566、low 0.587、off 0.158。
+ *
+ * 用途：把「这一步只用了 high」换算成「如果按用户配置的 max 跑，会多花多少输出 token」，
+ * 这样 effort 杠杆才能进真实账本，而不是只存在于报告里。
+ * 注意这是**短 prompt 校准值**，用于比例估算；快照里会标明来源。
+ */
+export declare const EFFORT_OUTPUT_FACTOR: Record<string, number>;
+export declare function outputFactorFor(effort: string | undefined): number | undefined;
 export interface ProviderUsage {
     inputTokens?: number;
     outputTokens?: number;
@@ -37,6 +50,10 @@ export interface BillingRequestInput {
     afterChars: number;
     /** 被输出截断丢弃的 token（未经验证，单独列示）。 */
     unverifiedOutputTokens?: number;
+    /** 这一步实际使用的 reasoning effort（用于把 effort 杠杆折算成反事实成本）。 */
+    effort?: string;
+    /** 用户配置的基准 effort；缺省视为 max。 */
+    baselineEffort?: string;
 }
 export interface BillingRecord {
     at: number;
@@ -57,6 +74,8 @@ export interface BillingRecord {
     /** 本请求实测移除的 prompt token（经字符比校准）。 */
     removedPromptTokens: number;
     savedMissTokens: number;
+    /** effort 降档后省下的输出 token（按配对校准的比例折算）。 */
+    avoidedOutputTokens: number;
     savedHitTokens: number;
     unverifiedOutputTokens: number;
 }

@@ -572,6 +572,8 @@ function installSchemaCompressor(ctx, options = {}) {
                 usage: { ...chunk.usage, cacheReadTokens: hitDelta },
                 beforeChars,
                 afterChars,
+                effort: !isKeepalive ? options.effortContext?.()?.effort : undefined,
+                baselineEffort: !isKeepalive ? options.effortContext?.()?.baseline : undefined,
             });
         }
         catch (error) {

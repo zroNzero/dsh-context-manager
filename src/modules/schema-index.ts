@@ -233,7 +233,12 @@ export interface SchemaCompressorOptions {
     usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
     beforeChars: number
     afterChars: number
+    /** 本次调用实际使用的 effort 与用户基准档位（供账本折算 effort 杠杆）。 */
+    effort?: string
+    baselineEffort?: string
   }) => void
+  /** 读取最近一次 effort 决策，供 onUsage 记账使用。 */
+  effortContext?: () => { effort?: string; baseline?: string } | null
 }
 
 /** 模型可见载荷的字符数（system + messages + tools），用于真实账本的字符比校准。 */
@@ -684,6 +689,8 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
         usage: { ...chunk.usage, cacheReadTokens: hitDelta },
         beforeChars,
         afterChars,
+        effort: !isKeepalive ? options.effortContext?.()?.effort : undefined,
+        baselineEffort: !isKeepalive ? options.effortContext?.()?.baseline : undefined,
       })
     } catch (error) {
       logEvent('warn', 'billing.usage_failed', { module: 'Billing', error: String(error) })

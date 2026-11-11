@@ -20,8 +20,32 @@
  * （见 README「已知卡点 2」），所以只以 `unverifiedOutputTokens` 单独列示，不计入降幅。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BillingLedger = exports.CacheReadNormalizer = void 0;
+exports.BillingLedger = exports.CacheReadNormalizer = exports.EFFORT_OUTPUT_FACTOR = void 0;
+exports.outputFactorFor = outputFactorFor;
 const pricing_js_1 = require("./pricing.js");
+/**
+ * 各 reasoning effort 档位的**相对输出量**（以 max 为 1.0）。
+ *
+ * 来源：2026-11-11 的配对校准（同 3 条 prompt × 4 档，真实调用）：
+ *   max 608 token / high 344 / low 357 / off 96
+ * 折算：high 0.566、low 0.587、off 0.158。
+ *
+ * 用途：把「这一步只用了 high」换算成「如果按用户配置的 max 跑，会多花多少输出 token」，
+ * 这样 effort 杠杆才能进真实账本，而不是只存在于报告里。
+ * 注意这是**短 prompt 校准值**，用于比例估算；快照里会标明来源。
+ */
+exports.EFFORT_OUTPUT_FACTOR = {
+    max: 1,
+    high: 0.566,
+    low: 0.587,
+    off: 0.158,
+};
+function outputFactorFor(effort) {
+    if (!effort)
+        return undefined;
+    const value = exports.EFFORT_OUTPUT_FACTOR[effort];
+    return typeof value === 'number' && value > 0 ? value : undefined;
+}
 const emptyBucket = () => ({
     requests: 0,
     missTokens: 0,
@@ -104,7 +128,18 @@ class BillingLedger {
         const hitRatio = promptTokens > 0 ? hit / promptTokens : 0;
         const savedHitTokens = Math.round(removedPromptTokens * hitRatio);
         const savedMissTokens = removedPromptTokens - savedHitTokens;
-        const counterfactualCost = actualCost + (0, pricing_js_1.costOf)(savedHitTokens, price.hit) + (0, pricing_js_1.costOf)(savedMissTokens, price.miss);
+        // effort 杠杆：这一步实际只用了 effort 档位，如果按用户配置的 baseline 跑会多花多少输出。
+        // 比例来自配对校准（EFFORT_OUTPUT_FACTOR），因此这一项是「实测比例 × 真实 token」。
+        const actualFactor = outputFactorFor(input.effort);
+        const baselineFactor = outputFactorFor(input.baselineEffort) ?? 1;
+        const effortScales = actualFactor !== undefined && input.effort !== input.baselineEffort && baselineFactor > actualFactor;
+        const avoidedOutputTokens = effortScales
+            ? Math.max(0, Math.round((out * baselineFactor) / actualFactor) - out)
+            : 0;
+        const counterfactualCost = actualCost +
+            (0, pricing_js_1.costOf)(savedHitTokens, price.hit) +
+            (0, pricing_js_1.costOf)(savedMissTokens, price.miss) +
+            (0, pricing_js_1.costOf)(avoidedOutputTokens, price.output);
         const unverified = Math.max(0, Math.trunc(input.unverifiedOutputTokens ?? 0));
         const record = {
             at,
@@ -120,6 +155,7 @@ class BillingLedger {
             savedCost: counterfactualCost - actualCost,
             removedPromptTokens,
             savedMissTokens,
+            avoidedOutputTokens,
             savedHitTokens,
             unverifiedOutputTokens: unverified,
         };
