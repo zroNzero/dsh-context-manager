@@ -730,12 +730,37 @@ async function main() {
         send('把这段 JSON 格式化一下', 'max'); // trivial -> off
         send('继续', 'max'); // easy -> low
         send('重构鉴权模块并排查这个死锁', 'max'); // hard -> max 保持不变
-        send('重构鉴权模块并排查这个死锁', 'low'); // hard 但宿主更低 -> 不上调
+        send('重构鉴权模块并排查这个死锁', 'low'); // 上游回传上一轮的低档，也不得棘轮锁死
         disposeE();
         assert(captured[0].reasoningEffort === 'off', `trivial turn must run at off, got ${captured[0].reasoningEffort}`);
         assert(captured[1].reasoningEffort === 'low', `easy turn must run at low, got ${captured[1].reasoningEffort}`);
         assert(captured[2].reasoningEffort === 'max', `hard turn must keep max, got ${captured[2].reasoningEffort}`);
-        assert(captured[3].reasoningEffort === 'low', `must never raise above the host request, got ${captured[3].reasoningEffort}`);
+        assert(captured[3].reasoningEffort === 'max', `an echoed low must not ratchet a hard turn down, got ${captured[3].reasoningEffort}`);
+    });
+    await check('effort: the user setting caps how far it may go', async () => {
+        // 用户把档位设成 low 时，策略最多只能用到 low，绝不擅自上调。
+        const captured = [];
+        const ctxU = {
+            systemPrompt: { section: () => () => { } },
+            tools: { register: () => () => { } },
+            on: () => () => { },
+            agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm', reasoningEffort: 'low' }) },
+        };
+        ctxU.llm = {
+            stream(request) {
+                captured.push(request);
+                return (async function* () { })();
+            },
+        };
+        const disposeU = (0, index_1.apply)(ctxU, cfg);
+        ctxU.llm.stream({
+            provider: 'p',
+            model: 'm',
+            reasoningEffort: 'max',
+            messages: [{ role: 'user', content: [{ type: 'text', text: '重构鉴权模块并排查死锁' }] }],
+        });
+        disposeU();
+        assert(captured[0].reasoningEffort === 'low', `user setting must cap effort, got ${captured[0].reasoningEffort}`);
     });
     await check('prepared path: effort frozen before dispatch, keepalive opens its own call', async () => {
         // 复刻 DSH 的真实约束：prepareCall 冻结 config，dispatch 时严格比较；不一致即

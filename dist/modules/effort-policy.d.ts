@@ -77,8 +77,19 @@ export declare function lastUserText(messages: unknown): string;
 /**
  * 决定这一步的 reasoning effort。永远不高于宿主请求的值。
  */
+/**
+ * 决定这一步的 reasoning effort。
+ *
+ * 关键：**基准必须来自用户配置，而不是上游传进来的 requested**。
+ * 实测踩坑（会话 794b93ff，12:14 起）：`configure` 的返回值会被宿主写成该会话的
+ * `request/header.config`，而下一轮又把它当作 requested 传回来 —— 于是「只下调」
+ * 变成单向棘轮：一旦降到 low，之后所有步骤（连复杂任务的规划步）都被锁死在 low。
+ * 所以这里用 baseline（用户设置）当上限，每次重新独立计算。
+ */
 export declare function decideEffort(input: {
     messages: unknown;
     requested?: unknown;
+    /** 用户配置的档位，作为「不得超越」的上限；缺省按 max。 */
+    baseline?: unknown;
     policy: EffortPolicyConfig;
 }): EffortDecision;

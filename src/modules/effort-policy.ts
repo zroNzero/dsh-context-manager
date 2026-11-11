@@ -168,14 +168,24 @@ export function lastUserText(messages: unknown): string {  if (!Array.isArray(me
 /**
  * 决定这一步的 reasoning effort。永远不高于宿主请求的值。
  */
+/**
+ * 决定这一步的 reasoning effort。
+ *
+ * 关键：**基准必须来自用户配置，而不是上游传进来的 requested**。
+ * 实测踩坑（会话 794b93ff，12:14 起）：`configure` 的返回值会被宿主写成该会话的
+ * `request/header.config`，而下一轮又把它当作 requested 传回来 —— 于是「只下调」
+ * 变成单向棘轮：一旦降到 low，之后所有步骤（连复杂任务的规划步）都被锁死在 low。
+ * 所以这里用 baseline（用户设置）当上限，每次重新独立计算。
+ */
 export function decideEffort(input: {
   messages: unknown
   requested?: unknown
+  /** 用户配置的档位，作为「不得超越」的上限；缺省按 max。 */
+  baseline?: unknown
   policy: EffortPolicyConfig
 }): EffortDecision {
-  // 无法读到宿主档位时按 max 处理：这是本 profile 的配置值，也是「可下调范围最大」的假设。
-  // 日志会记下 from 字段，实盘可核对这个假设是否成立。
   const requested = normalizeEffort(input.requested) ?? 'max'
+  const base = normalizeEffort(input.baseline) ?? 'max'
   const policy = input.policy
   const turn = classifyTurn(lastUserText(input.messages))
 
@@ -207,6 +217,8 @@ export function decideEffort(input: {
     }
   }
 
-  const effort = lowerEffort(desired, requested)
+  // 上限是用户设置（base），不是上游这一步传来的 requested —— 后者可能是我们
+  // 上一轮写进会话 header 的降档结果，用它当上限会形成不可逆的单向棘轮。
+  const effort = lowerEffort(desired, base)
   return { tier: turn.tier, effort, requested, reason, escalated }
 }

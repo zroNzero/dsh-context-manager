@@ -436,6 +436,23 @@ function apply(ctx, rawConfig = {}) {
     const sessionWorkspaces = new Map();
     /** 最近一次 pre-step 的观测信号，供 prepareCall 前判定 reasoning effort。 */
     let effortContext = null;
+    /**
+     * 用户配置的 reasoning effort —— 只作为「不得超越」的上限。
+     * 不能拿上游传进来的 reasoningEffort 当上限：宿主会把我们上一轮写进 config 的
+     * 结果写回会话 header，下一轮再当 requested 传回来，于是形成单向棘轮（实测踩到）。
+     */
+    const effortBaseline = () => {
+        try {
+            const selection = services.agentDefaultModel?.currentSelection?.();
+            const effort = selection?.reasoningEffort ?? selection?.controls?.reasoningEffort ?? selection?.config?.reasoningEffort;
+            if (effort)
+                return { effort, source: 'agentDefaultModel' };
+        }
+        catch {
+            /* 服务不可用就退回默认上限 */
+        }
+        return { effort: undefined, source: 'default-max' };
+    };
     const liveSession = (sessionId, fallback) => {
         try {
             const store = services.sessions;
@@ -632,9 +649,11 @@ function apply(ctx, rawConfig = {}) {
                 if (!config.dynamicEffortEnabled || effortContext === null)
                     return controls;
                 const requested = controls?.reasoningEffort ?? model?.reasoning?.defaultEffort;
+                const baseline = effortBaseline();
                 const decision = (0, effort_policy_1.decideEffort)({
                     messages: (0, effort_policy_1.syntheticMessages)(effortContext),
                     requested,
+                    baseline: baseline.effort,
                     policy: {
                         enabled: config.dynamicEffortEnabled,
                         trivial: config.effortTrivial,
@@ -650,6 +669,8 @@ function apply(ctx, rawConfig = {}) {
                     module: 'EffortPolicy',
                     scope: 'configureCall',
                     tier: decision.tier,
+                    baseline: String(baseline.effort ?? 'max'),
+                    baselineSource: baseline.source,
                     from: decision.requested,
                     to: decision.effort,
                     effortSource: requested === undefined ? 'assumed-max' : 'request',
@@ -660,9 +681,11 @@ function apply(ctx, rawConfig = {}) {
             },
             resolveEffort: (request) => {
                 const requested = request?.reasoningEffort ?? request?.config?.reasoningEffort;
+                const baseline = effortBaseline();
                 const decision = (0, effort_policy_1.decideEffort)({
                     messages: request?.messages,
                     requested,
+                    baseline: baseline.effort,
                     policy: {
                         enabled: config.dynamicEffortEnabled,
                         trivial: config.effortTrivial,
@@ -678,6 +701,8 @@ function apply(ctx, rawConfig = {}) {
                     module: 'EffortPolicy',
                     sessionId: request?.sessionId ?? 'unknown',
                     tier: decision.tier,
+                    baseline: String(baseline.effort ?? 'max'),
+                    baselineSource: baseline.source,
                     from: decision.requested,
                     to: decision.effort,
                     effortSource: requested === undefined ? 'assumed-max' : 'request',

@@ -508,12 +508,17 @@ check('effort.dynamic-policy', () => {
   )
 
   const easy = [{ role: 'user', content: [{ type: 'text', text: '继续' }] }]
-  const lowered = decideEffort({ messages: easy, requested: 'max', policy })
+  const lowered = decideEffort({ messages: easy, requested: 'max', baseline: 'max', policy })
   assert(lowered.requested === 'max' && lowered.effort === 'low', `easy step from max must drop to low, got ${lowered.effort}`)
 
-  // 只下调、不上调：宿主已经更低就听宿主的
-  const raised = decideEffort({ messages: [{ role: 'user', content: [{ type: 'text', text: '重构整个模块' }] }], requested: 'low', policy })
-  assert(raised.effort === 'low', `must never raise above the host request, got ${raised.effort}`)
+  // 只下调、不上调：用户设置是上限
+  const raised = decideEffort({ messages: [{ role: 'user', content: [{ type: 'text', text: '重构整个模块' }] }], requested: 'max', baseline: 'low', policy })
+  assert(raised.effort === 'low', `must never exceed the user baseline, got ${raised.effort}`)
+
+  // 棘轮回归：宿主会把我们上一轮写进 config 的 low 当作 requested 回传，
+  // 复杂任务的规划步仍然必须回到 max（否则整段会话被永久锁死在 low）。
+  const ratchet = decideEffort({ messages: [{ role: 'user', content: [{ type: 'text', text: '重构鉴权模块' }] }], requested: 'low', baseline: 'max', policy })
+  assert(ratchet.effort === 'max', `echoed low must not ratchet the policy down, got ${ratchet.effort}`)
 
   // 轮内工具报错 -> 升级到 hard 档
   const errored = decideEffort({
@@ -522,17 +527,18 @@ check('effort.dynamic-policy', () => {
       { role: 'tool', content: [{ type: 'text', text: 'Error: boom\n    at x (a.ts:3:4)' }] },
     ],
     requested: 'max',
+    baseline: 'max',
     policy,
   })
   assert(errored.escalated === true && errored.effort === 'max', `tool error must escalate, got ${errored.effort}`)
 
   // 关闭时完全透传
-  const off = decideEffort({ messages: easy, requested: 'max', policy: { ...policy, enabled: false } })
+  const off = decideEffort({ messages: easy, requested: 'max', baseline: 'max', policy: { ...policy, enabled: false } })
   assert(off.effort === 'max' && off.reason === 'policy-disabled', 'disabled policy must not touch the request')
 
-  // 规划步 vs 执行步：同一个 hard 任务，第一问给足深度，照计划执行的后续步骤降一档
+  // 规划步 vs 执行步
   const hardPrompt = [{ role: 'user', content: [{ type: 'text', text: '重构鉴权模块' }] }]
-  const planning = decideEffort({ messages: hardPrompt, requested: 'max', policy })
+  const planning = decideEffort({ messages: hardPrompt, requested: 'max', baseline: 'max', policy })
   assert(planning.effort === 'max' && planning.reason.endsWith(':plan'), `planning step must keep max, got ${planning.effort}`)
   const executing = decideEffort({
     messages: [
@@ -541,16 +547,17 @@ check('effort.dynamic-policy', () => {
       { role: 'tool', content: [{ type: 'text', text: 'ok' }] },
     ],
     requested: 'max',
+    baseline: 'max',
     policy,
   })
   assert(executing.effort === 'high' && executing.reason.endsWith(':execute'), `execution step must drop a notch, got ${executing.effort}`)
-  // 执行步也不会掉到底：hard 任务的下限是 low
   const lowPlan = decideEffort({
     messages: [
       ...hardPrompt,
       { role: 'tool', content: [{ type: 'text', text: 'ok' }] },
     ],
     requested: 'max',
+    baseline: 'max',
     policy: { ...policy, hard: 'low' as const },
   })
   assert(lowPlan.effort === 'off' || lowPlan.effort === 'low', `execution step must stay sane, got ${lowPlan.effort}`)
