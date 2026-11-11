@@ -800,9 +800,44 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
              * 老 thinking 只在探针判定 allowed 之后才丢（默认 false，见 reasoning-drop.ts）：
              * 违反 thinking 回传契约会直接打断会话，不能拿它赌。
              */
-            const next = staleReasoningAllowed
-              ? stripStaleReasoning(folded.messages, config.dropStaleReasoningRetainRecent).messages
-              : folded.messages
+            const stripStats = staleReasoningAllowed
+              ? stripStaleReasoning(folded.messages, config.dropStaleReasoningRetainRecent)
+              : null
+            const next = stripStats ? stripStats.messages : folded.messages
+            /**
+             * 折叠与剥 thinking 的真实结果必须落日志。
+             * 之前只有 `removedPromptTokens` 一个汇总数，看不出剥 thinking 到底有没有生效
+             * （`payloadChars` 一直停在 680K，而预测应到 172K），只能靠猜。
+             * 现在把 role 直方图、块类型直方图、两边各省多少一起打出来。
+             */
+            if (folded.stats.folded > 0 || next.length !== messages.length || staleReasoningAllowed) {
+              const roles: Record<string, number> = {}
+              const blocks: Record<string, number> = {}
+              for (const message of Array.isArray(messages) ? messages : []) {
+                const role = String(message?.role ?? '?')
+                roles[role] = (roles[role] ?? 0) + 1
+                if (Array.isArray(message?.content)) {
+                  for (const block of message.content) {
+                    const type = String(block?.type ?? '?')
+                    blocks[type] = (blocks[type] ?? 0) + 1
+                  }
+                } else if (typeof message?.content === 'string') {
+                  blocks['plain-string'] = (blocks['plain-string'] ?? 0) + 1
+                }
+              }
+              logEvent('debug', 'history.fold', {
+                module: 'PrefixSpill',
+                messages: Array.isArray(messages) ? messages.length : 0,
+                foldAllowed: config.prefixSpillEnabled,
+                foldCharsSaved: folded.stats.charsBefore - folded.stats.charsAfter,
+                folded: folded.stats.folded,
+                stripAllowed: staleReasoningAllowed,
+                stripCharsSaved: stripStats ? stripStats.charsSaved : 0,
+                stripped: stripStats ? stripStats.stripped : 0,
+                roles,
+                blocks,
+              })
+            }
             return finish(next)
           }
         : undefined,
