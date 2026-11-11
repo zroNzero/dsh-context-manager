@@ -88,6 +88,15 @@ export function rewriteMessages(messages: any[], options: RewriteOptions = {}): 
     if (index >= boundary) return message
     const role = message?.role
     if (role !== 'tool' && role !== 'assistant') return message
+    // thinking 模式：assistant 的 reasoning 块必须原样回传，重写等于删掉它，
+    // DeepSeek 会直接报 `content[].thinking ... must be passed back`。
+    if (
+      role === 'assistant' &&
+      Array.isArray(message?.content) &&
+      message.content.some((block: any) => block?.type === 'reasoning' || block?.type === 'thinking')
+    ) {
+      return message
+    }
     const original = textOf(message?.content)
     if (original.length === 0) return message
     const compacted =

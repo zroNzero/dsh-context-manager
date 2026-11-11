@@ -894,6 +894,42 @@ async function main(): Promise<void> {
     }
   })
 
+  await check('reload: a second install replaces the previous layer instead of stacking', async () => {
+    // 宿主 in-place 重载不 dispose 旧 fiber（实测无 apply.dispose），旧层会拦截请求。
+    const calls: number[] = []
+    const base = () => {
+      calls.push(1)
+      return (async function* () {
+        yield { type: 'usage', usage: { inputTokens: 100, cacheReadTokens: 900, outputTokens: 50 } }
+      })()
+    }
+    const llm: any = { stream: base }
+    const seenA: any[] = []
+    const seenB: any[] = []
+    const disposeA = installSchemaCompressor({ llm } as any, { enabled: true, onUsage: (info) => seenA.push(info) })
+    const disposeB = installSchemaCompressor({ llm } as any, { enabled: true, onUsage: (info) => seenB.push(info) })
+    try {
+      for await (const _chunk of llm.stream({ provider: 'p', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }] })) {
+        /* drain */
+      }
+      assert(calls.length === 1, `exactly one upstream call expected, got ${calls.length}`)
+      assert(seenB.length === 1, `the newest layer must observe usage once, got ${seenB.length}`)
+      assert(seenA.length === 0, 'the replaced layer must be fully detached')
+
+      // 旧 disposer 再被调用一次（宿主可能会），不能把新层拆掉
+      disposeA()
+      for await (const _chunk of llm.stream({ provider: 'p', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: 'y' }] }] })) {
+        /* drain */
+      }
+      const callsAfter = Number(calls.length)
+      const seenAfter = Number(seenB.length)
+      assert(callsAfter === 2 && seenAfter === 2, `a stale disposer must not unpatch the live layer (${callsAfter}/${seenAfter})`)
+    } finally {
+      disposeB()
+    }
+    assert(llm.stream === base, 'the live disposer must restore the original stream')
+  })
+
   await check('response cache replays identical request', async () => {
     const ctx6: any = { systemPrompt: { section: () => () => {} }, tools: { register: () => () => {} }, on: () => () => {} }
     let calls = 0

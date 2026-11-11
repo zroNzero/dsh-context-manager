@@ -115,6 +115,7 @@ function planMemoryFold(entries, options = {}) {
     // "tool calls need immediate results"。因此带 tool-call 的 assistant 与所有
     // tool 结果一律不参与折叠，只折叠纯文本 / CoT 消息。
     let blockedByToolCall = 0;
+    let blockedByThinking = 0;
     const flags = entries.map((entry, index) => {
         if (entry.role === 'user')
             return false;
@@ -126,6 +127,11 @@ function planMemoryFold(entries, options = {}) {
             return false;
         if (entry.hasToolCall === true) {
             blockedByToolCall += 1;
+            return false;
+        }
+        // thinking 模式：assistant 的 reasoning 必须原样回传，折叠即整轮 INVALID_REQUEST。
+        if (entry.hasThinking === true) {
+            blockedByThinking += 1;
             return false;
         }
         if (index >= entries.length - retainRecent)
@@ -246,6 +252,7 @@ function planMemoryFold(entries, options = {}) {
         qualityPass,
         backfilled,
         toolcallExcluded: blockedByToolCall,
+        thinkingExcluded: blockedByThinking,
         patchId: patch.patchId,
     });
     return {

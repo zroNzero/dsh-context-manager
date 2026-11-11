@@ -22,6 +22,14 @@ export interface MemoryEntry {
   sourceKind?: string
   /** 是否包含 tool-call 块。带工具调用的 assistant 消息绝不能折叠（会留下孤儿 tool/call）。 */
   hasToolCall?: boolean
+  /**
+   * 是否包含 reasoning / thinking 块。
+   * DeepSeek thinking 模式要求把 assistant 的 thinking 原样回传，否则下一轮直接
+   * `INVALID_REQUEST: content[].thinking in the thinking mode must be passed back`。
+   * 折叠会把它替换成纯文本摘要 —— 实测就是这么把整轮跑挂的，所以带 thinking 的
+   * assistant 消息一律不折叠。
+   */
+  hasThinking?: boolean
 }
 
 export interface MemoryPlan {
@@ -165,6 +173,7 @@ export function planMemoryFold(
   // "tool calls need immediate results"。因此带 tool-call 的 assistant 与所有
   // tool 结果一律不参与折叠，只折叠纯文本 / CoT 消息。
   let blockedByToolCall = 0
+  let blockedByThinking = 0
   const flags: boolean[] = entries.map((entry, index) => {
     if (entry.role === 'user') return false
     if (entry.role === 'tool') {
@@ -174,6 +183,11 @@ export function planMemoryFold(
     if (entry.role === 'system') return false
     if (entry.hasToolCall === true) {
       blockedByToolCall += 1
+      return false
+    }
+    // thinking 模式：assistant 的 reasoning 必须原样回传，折叠即整轮 INVALID_REQUEST。
+    if (entry.hasThinking === true) {
+      blockedByThinking += 1
       return false
     }
     if (index >= entries.length - retainRecent) return false
@@ -302,6 +316,7 @@ export function planMemoryFold(
     qualityPass,
     backfilled,
     toolcallExcluded: blockedByToolCall,
+    thinkingExcluded: blockedByThinking,
     patchId: patch.patchId,
   })
 

@@ -310,6 +310,26 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     return () => {}
   }
 
+  /**
+   * 热重载防护：宿主对已加载的插件做 in-place 重新应用时**不会** dispose 旧 fiber
+   * （实测 12:23 / 12:26 两次重载之间没有任何 apply.dispose），于是每重载一次就在
+   * llm.stream 外面多套一层。旧层会先拦截请求（自带缓存/旧策略），新层的修复形同虚设。
+   *
+   * 用 globalThis 上的单例记录上一个安装：跨模块实例也能生效，先拆掉旧的再装新的。
+   * 注意顺序 —— 必须先把旧层恢复成真正的原始 stream，再捕获 originalStream，
+   * 否则会捕获到旧层的包装函数，等于又叠一层。
+   */
+  const registry = globalThis as unknown as { __costKillerStreamInstall?: { llm: any; dispose: () => void } }
+  try {
+    const previous = registry.__costKillerStreamInstall
+    if (previous && previous.llm === llm) {
+      previous.dispose()
+      logEvent('info', 'schema.replaced', { module: 'SchemaIndex', reason: 'in-place reload; previous layer removed' })
+    }
+  } catch {
+    /* 拆旧层失败不影响重新安装 */
+  }
+
   let lastLogKey = ''
   let lastBudgetKey = ''
   const anchors = new Map<string, { bucket: string; names: string[] }>()
@@ -774,14 +794,21 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     return () => {}
   }
 
-  return () => {
+  const dispose = (): void => {
+    // 幂等：热重载时新实例会先调旧实例的 dispose，用户/宿主之后再调一次不能把新层拆掉。
+    if (disposed) return
     disposed = true
     cancelKeepalive()
     try {
       llm.stream = originalStream
       if (typeof originalPrepare === 'function') llm.prepareCall = originalPrepare
-    } catch {}
+    } catch {
+      /* 恢复失败也不抛出 */
+    }
+    if (registry.__costKillerStreamInstall?.dispose === dispose) delete registry.__costKillerStreamInstall
   }
+  registry.__costKillerStreamInstall = { llm, dispose }
+  return dispose
 }
 
 /** 供 demo 使用：估算一组 schema 的 token 数。 */

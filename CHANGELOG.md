@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — thinking 模式硬约束（2026-11-11 事故后）
+
+真实故障：`INVALID_REQUEST: The content[].thinking in the thinking mode must be passed back to the API`，
+整轮运行失败。触发点是 `memory.fold_applied`——折叠把一条带 reasoning 块的 assistant 消息
+替换成了纯文本摘要，thinking 模式随即拒绝下一轮请求。
+
+- **折叠永不动带 reasoning/thinking 的 assistant 消息**（`hasThinking` 标记 + 计划统计
+  `thinkingExcluded`）。此前只排除 tool-call 与 tool 结果，thinking 是新的一类致命块。
+- **历史重写同样跳过带 reasoning 的 assistant 消息**（即使有人显式打开 `rewriteEnabled`）。
+- 精确响应缓存的 key 补上 `reasoningEffort / maxTokens / temperature / stop`：缺了这四项，
+  「换档位」会被缓存静默吃掉，调参等于没调。
+- 热重载防护：宿主 in-place 重新应用不会 dispose 旧实例，`llm.stream` 会被层层套娃。
+  现在通过 `globalThis` 单例记录上一个安装，新实例先拆旧层再装，disposer 幂等。
+- 测试：self-test 23/23（新增 thinking 折叠/重写排除）、verify 32/32（新增重载不叠加）。
+
 ## Unreleased — 缓存安全与真实账单（2026-11-11）
 
 真实账单分析（`docs/REAL-BILL-ANALYSIS.md`）显示：prompt 缓存命中 ¥0.02/M、未命中 ¥1/M，

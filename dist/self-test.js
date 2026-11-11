@@ -485,6 +485,45 @@ check('effort.dynamic-policy', () => {
     });
     assert(lowPlan.effort === 'off' || lowPlan.effort === 'low', `execution step must stay sane, got ${lowPlan.effort}`);
 });
+// ---------------------------------------------------------------------------
+// 13) thinking 模式的硬约束：带 reasoning 的 assistant 消息不能折叠 / 不能重写
+//     （实测 2026-11-11 20:32：折叠后整轮 INVALID_REQUEST）
+// ---------------------------------------------------------------------------
+check('memory.fold-excludes-thinking', () => {
+    const entry = (seq, role, text, extra = {}) => ({ seq, role, text, ...extra });
+    const entries = [entry(1, 'user', '需求'), entry(2, 'system', 'constraints')];
+    // 8 条「带 thinking」的 assistant 消息，足够长、够旧，唯一阻止折叠的理由就是 thinking
+    for (let index = 0; index < 8; index += 1) {
+        entries.push(entry(10 + index, 'assistant', `思考过程 ${index} ${'x'.repeat(2000)}`, { hasThinking: true }));
+    }
+    entries.push(entry(99, 'assistant', '最近一条'));
+    const plan = (0, memory_1.planMemoryFold)(entries, { retainRecent: 1, minSaveTokens: 1 });
+    assert(plan.patch === null, 'thinking messages must never be folded');
+    assert(plan.foldedSeqs.length === 0, 'no thinking message may appear in foldedSeqs');
+    // 同样的消息，去掉 hasThinking 就会折叠 —— 证明上面的「不折叠」不是别的原因
+    const plain = entries.map((item) => ({ ...item, hasThinking: false }));
+    const foldable = (0, memory_1.planMemoryFold)(plain, { retainRecent: 1, minSaveTokens: 1 });
+    assert(foldable.patch !== null, 'the same history without thinking should fold (control group)');
+});
+check('rewrite.leaves-thinking-messages-untouched', () => {
+    const messages = [{ role: 'user', content: [{ type: 'text', text: '需求' }] }];
+    for (let index = 0; index < 6; index += 1) {
+        messages.push({
+            role: 'assistant',
+            content: [
+                { type: 'reasoning', text: `推理 ${index} ${'r'.repeat(300)}` },
+                { type: 'text', text: `结论 ${index} ${'a'.repeat(600)}` },
+            ],
+        });
+        messages.push({ role: 'user', content: [{ type: 'text', text: `继续 ${index}` }] });
+    }
+    const result = (0, history_rewriter_1.rewriteMessages)(messages, { retainRecent: 2, assistantChars: 100, toolChars: 300 });
+    for (let index = 1; index < messages.length; index += 2) {
+        const before = JSON.stringify(messages[index]);
+        const after = JSON.stringify(result.messages[index]);
+        assert(before === after, `thinking message ${index} must be passed through verbatim`);
+    }
+});
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {
     process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'} ${item.name} :: ${item.detail}\n`);

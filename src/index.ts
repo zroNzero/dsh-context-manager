@@ -215,6 +215,12 @@ function collectEntries(session: any): MemoryEntry[] {
     if (!message) continue
     const content = message?.content
     const contentHasToolCall = Array.isArray(content) && content.some((block: any) => block?.type === 'tool-call')
+    // thinking / reasoning 块：DeepSeek thinking 模式要求原样回传，任何折叠都会让整轮
+    // 直接 INVALID_REQUEST（实测 2026-11-11 20:32）。这里把它标出来，供折叠排除。
+    const hasThinking =
+      Array.isArray(content) &&
+      content.some((block: any) => block?.type === 'reasoning' || block?.type === 'thinking') ||
+      (message?.thinking !== undefined && message?.thinking !== null)
     const declaredToolCalls =
       (Array.isArray(message?.toolCalls) && message.toolCalls.length > 0) ||
       (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0)
@@ -226,6 +232,7 @@ function collectEntries(session: any): MemoryEntry[] {
       isError: event?.type === 'tool/result' && event?.data?.error !== undefined,
       sourceKind: typeof message?.source?.kind === 'string' ? message.source.kind : undefined,
       hasToolCall,
+      hasThinking,
     })
   }
   return entries
