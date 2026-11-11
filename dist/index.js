@@ -117,6 +117,12 @@ exports.Config = zod_1.z.object({
     prefixSpillRetainRecent: zod_1.z.number().int().nonnegative().default(6),
     prefixSpillMinChars: zod_1.z.number().int().positive().default(600),
     /**
+     * 旧 tool-call 参数折叠阈值。丢完老 thinking 之后参数成了最大单项（约占发出内容的
+     * 45%），而模型真正需要的是「我调了什么工具」+「结果是什么」，不是当初那段长脚本文本。
+     * 参数落盘后替换成合法 JSON 收据（_spilled/_chars/_head），id 与 name 原样保留。
+     */
+    prefixSpillMinArgChars: zod_1.z.number().int().positive().default(320),
+    /**
      * 丢掉「最近 N 条之外」的历史 thinking（约占前缀 1/3）。
      * auto：启动后先发两条一次性探针，只有对照组和删除组都成功才开启；denied/inconclusive
      * 一律保持关闭——thinking 契约违反会直接打断会话，不能拿它赌。
@@ -576,7 +582,9 @@ function apply(ctx, rawConfig = {}) {
         const sectionDisposer = services.systemPrompt?.section?.({
             name: 'cost-killer:policy',
             order: 46,
-            text: POLICY_TEXT,
+            text: config.prefixSpillEnabled
+                ? `${POLICY_TEXT} Folded history uses [SPILL] receipts: when only the file name is given, it is under ${path.resolve(config.spillDir)} — read it if you need the original.`
+                : POLICY_TEXT,
         });
         if (typeof sectionDisposer === 'function')
             disposers.push(sectionDisposer);
@@ -792,6 +800,7 @@ function apply(ctx, rawConfig = {}) {
                         spillDir: config.spillDir,
                         retainRecent: config.prefixSpillRetainRecent,
                         minChars: config.prefixSpillMinChars,
+                        minArgChars: config.prefixSpillMinArgChars,
                     });
                     const finish = (next) => {
                         if (config.rewriteEnabled) {

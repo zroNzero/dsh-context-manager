@@ -615,13 +615,40 @@ check('prefix.spill-lossless-and-deterministic', () => {
     assert(first.stats.folded === 1, `only the old tool result folds, got ${first.stats.folded}`);
     assert(first.messages.length === messages.length, 'message count must not change (tool pairing)');
     assert(first.messages[1].content[0].type === 'tool-call', 'assistant tool-call must stay intact');
-    assert(first.messages[2].content[0].text.includes('[PREFIX-SPILL]'), 'receipt missing');
+    assert(first.messages[2].content[0].text.includes('[SPILL]'), 'receipt missing');
     assert(first.messages[3].content[0].text === 'recent-1', 'recent messages must stay verbatim');
     assert(first.messages[2].content[0].text === second.messages[2].content[0].text, 'receipt must be byte-identical across calls, or the prefix cache dies');
     // 收据里的路径必须真能读回原文（这才是「无损」）
     const file = first.stats.files[0];
     assert(node_fs_1.default.existsSync(file), `spilled file missing: ${file}`);
     assert(node_fs_1.default.readFileSync(file, 'utf8') === big, 'spilled content must equal the original byte for byte');
+});
+// ---------------------------------------------------------------------------
+// 25b) 旧 tool-call 参数折叠：必须仍是合法 JSON，且 id/name 原样保留
+// ---------------------------------------------------------------------------
+check('prefix.spill-preserves-tool-call-json', () => {
+    const dir = node_fs_1.default.mkdtempSync(node_path_1.default.join(node_os_1.default.tmpdir(), 'ck-args-'));
+    const longArgs = JSON.stringify({ command: 'Get-ChildItem -Recurse '.repeat(40) });
+    const messages = [
+        { role: 'user', content: [{ type: 'text', text: 'go' }] },
+        {
+            role: 'assistant',
+            content: [{ type: 'tool-call', id: 'call_42', name: 'pwsh', arguments: longArgs }],
+        },
+        { role: 'tool', content: [{ type: 'text', text: 'ok' }] },
+        { role: 'user', content: [{ type: 'text', text: 'recent' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ];
+    const { messages: out, stats } = (0, prefix_spill_1.foldOldToolResults)(messages, { spillDir: dir, retainRecent: 2, minArgChars: 200 });
+    assert(stats.foldedArgs === 1, `args must fold, got ${stats.foldedArgs}`);
+    const block = out[1].content[0];
+    assert(block.id === 'call_42', 'tool-call id must survive: it is the pairing key');
+    assert(block.name === 'pwsh', 'tool-call name must survive: it is the intent');
+    assert(typeof block.arguments === 'string', 'arguments must stay a string');
+    const parsed = JSON.parse(block.arguments);
+    assert(typeof parsed._spill === 'string' && !parsed._spill.includes('\\'), 'receipt must carry the bare file name (the dir lives in the prompt)');
+    assert(parsed._chars === longArgs.length, 'receipt must record the original size');
+    assert(node_fs_1.default.readFileSync(node_path_1.default.join(dir, parsed._spill), 'utf8') === longArgs, 'spilled args must be byte-exact');
 });
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {

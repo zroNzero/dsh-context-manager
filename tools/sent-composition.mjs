@@ -1,69 +1,99 @@
 #!/usr/bin/env node
 /**
- * 复现插件的压缩结果，并拆开「真正发出去的内容」由什么构成。
- * 这是判断「还剩下多少可压」的唯一可靠依据。
+ * 复现插件当前的压缩管线（旧工具结果落盘 + 旧参数落盘 + 丢老 thinking），
+ * 逐项拆开「真正发出去的内容」，并预测相对变化。
  *
- * 用法：node tools/sent-composition.mjs <session.v4.jsonl.zstd> [retain=6] [minChars=600]
+ * 用法：node tools/sent-composition.mjs <session.v4.jsonl.zstd> [budget=772849] [retain=6]
  */
 import { readSessionEvents } from './session-decode.mjs'
 
-const [file, retainArg, minArg] = process.argv.slice(2)
+const [file, budgetArg, retainArg] = process.argv.slice(2)
+const budget = Number(budgetArg ?? 772849)
 const retain = Number(retainArg ?? 6)
-const minChars = Number(minArg ?? 600)
+const MIN_CHARS = 600
+const MIN_ARG = 320
 if (!file) {
-  process.stderr.write('usage: node tools/sent-composition.mjs <session.v4.jsonl.zstd> [retain] [minChars]\n')
+  process.stderr.write('usage: node tools/sent-composition.mjs <session.v4.jsonl.zstd> [budget] [retain]\n')
   process.exit(2)
 }
 
 const { events } = readSessionEvents(file)
 const CONVERSATION = new Set(['user/message', 'assistant/message', 'tool/result', 'system/message', 'developer/message'])
-const rows = []
+const all = []
 for (const event of events) {
   const type = String(event?.type ?? '')
   if (!CONVERSATION.has(type)) continue
   const payload = event?.data?.message ?? event?.data?.result ?? event?.data?.content ?? event?.data ?? ''
-  rows.push({ type, payload })
+  all.push({ type, payload })
 }
 
-const RECEIPT = 420
-const cutoff = rows.length - retain
-const bucket = { 'old tool receipts': 0, 'old tool kept (small)': 0, 'old reasoning (dropped)': 0, 'old assistant text': 0, 'old assistant tool-call args': 0, 'old user/system': 0, 'recent window (verbatim)': 0 }
+const window = []
+let raw = 0
+for (let index = all.length - 1; index >= 0; index -= 1) {
+  const chars = JSON.stringify(all[index].payload).length
+  if (raw + chars > budget) break
+  raw += chars
+  window.push(all[index])
+}
+window.reverse()
 
-rows.forEach((row, index) => {
-  const isRecent = index >= cutoff
-  const raw = JSON.stringify(row.payload)
-  if (isRecent) {
-    bucket['recent window (verbatim)'] += raw.length
+// 收据现在是「短哈希 + 裸文件名」，目录由 system prompt 说明。
+const resultReceipt = (chars) => `[SPILL] ${chars}c prefix-a1b2c3d4e5f6.txt\n`.length + 100
+const argReceipt = (chars) => JSON.stringify({ _spill: 'args-a1b2c3d4e5f6.json', _chars: chars, _head: 'x'.repeat(120) }).length
+
+const cutoff = window.length - retain
+const sent = {
+  'assistant tool-call args (folded)': 0,
+  'assistant tool-call args (kept)': 0,
+  'assistant text': 0,
+  'tool results (folded)': 0,
+  'tool results (kept)': 0,
+  'user/system': 0,
+  'recent (verbatim)': 0,
+}
+let saved = 0
+
+window.forEach((row, index) => {
+  if (index >= cutoff) {
+    sent['recent (verbatim)'] += JSON.stringify(row.payload).length
     return
   }
   if (row.type === 'tool/result') {
     const text = typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload)
-    if (text.length > minChars) bucket['old tool receipts'] += RECEIPT
-    else bucket['old tool kept (small)'] += raw.length
+    if (text.length > MIN_CHARS) {
+      const receipt = resultReceipt(text.length)
+      sent['tool results (folded)'] += receipt
+      saved += text.length - receipt
+    } else sent['tool results (kept)'] += JSON.stringify(row.payload).length
     return
   }
   if (row.type === 'assistant/message') {
     const content = row.payload?.content
     if (!Array.isArray(content)) {
-      bucket['old assistant text'] += raw.length
+      sent['assistant text'] += JSON.stringify(row.payload).length
       return
     }
     for (const block of content) {
       if (block?.type === 'reasoning' || block?.type === 'thinking') {
-        bucket['old reasoning (dropped)'] += String(block?.text ?? '').length
-      } else if (block?.type === 'tool-call') bucket['old assistant tool-call args'] += JSON.stringify(block?.arguments ?? '').length
-      else bucket['old assistant text'] += JSON.stringify(block?.text ?? '').length
+        saved += String(block?.text ?? '').length
+      } else if (block?.type === 'tool-call') {
+        const args = typeof block.arguments === 'string' ? block.arguments : JSON.stringify(block.arguments ?? '')
+        if (args.length > MIN_ARG) {
+          const receipt = argReceipt(args.length)
+          sent['assistant tool-call args (folded)'] += receipt
+          saved += args.length - receipt
+        } else sent['assistant tool-call args (kept)'] += args.length
+      } else sent['assistant text'] += JSON.stringify(block?.text ?? '').length
     }
     return
   }
-  bucket['old user/system'] += raw.length
+  sent['user/system'] += JSON.stringify(row.payload).length
 })
 
-const sent = Object.entries(bucket)
-  .filter(([key]) => key !== 'old reasoning (dropped)')
-  .reduce((sum, [, value]) => sum + value, 0)
-process.stdout.write(`sent total ≈ ${sent} chars\n\n| part | chars | share of sent |\n|---|---:|---:|\n`)
-for (const [key, value] of Object.entries(bucket).sort((a, b) => b[1] - a[1])) {
-  const note = key === 'old reasoning (dropped)' ? ' (already saved)' : ''
-  process.stdout.write(`| ${key}${note} | ${value} | ${((value / Math.max(1, sent)) * 100).toFixed(1)}% |\n`)
+const sentTotal = Object.values(sent).reduce((a, b) => a + b, 0)
+process.stdout.write(`raw window=${raw} chars -> sent~${sentTotal} chars (-${((1 - sentTotal / raw) * 100).toFixed(1)}%)\n\n`)
+process.stdout.write('| part | chars | share of sent |\n|---|---:|---:|\n')
+for (const [key, value] of Object.entries(sent).sort((a, b) => b[1] - a[1])) {
+  process.stdout.write(`| ${key} | ${value} | ${((value / Math.max(1, sentTotal)) * 100).toFixed(1)}% |\n`)
 }
+process.stdout.write(`\nsaved total=${saved} chars\n`)
