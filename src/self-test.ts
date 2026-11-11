@@ -10,6 +10,7 @@ import path from 'node:path'
 import { runCacheAnchorSelfTest } from './cacheAnchor'
 import { runExtraction, buildFirewallSummary } from './modules/extraction'
 import { estimateTokens } from './contracts'
+import { rewriteMessages } from './modules/history-rewriter'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
 import { SavingsLedger } from './modules/savings-ledger'
@@ -202,6 +203,26 @@ check('host-sim.incident-replay', () => {
 // ---------------------------------------------------------------------------
 // 6) 折叠记账口径（2026-11-10 面板数字虚高事故）
 // ---------------------------------------------------------------------------
+
+check('history-rewriter.preserves-pairing', () => {
+  const messages: any[] = [{ role: 'user', content: [{ type: 'text', text: '需求' }] }]
+  for (let index = 0; index < 12; index += 1) {
+    messages.push({ role: 'assistant', content: [{ type: 'text', text: `<thought>plan ${index}</thought> 决定 ${'a'.repeat(800)}` }] })
+    messages.push({
+      role: 'tool',
+      toolCallId: `call_${index}`,
+      content: [{ type: 'text', text: Array.from({ length: 40 }, (_, line) => `line ${line} ${'b'.repeat(60)}`).join('\n') }],
+    })
+  }
+  messages.push({ role: 'user', content: [{ type: 'text', text: '继续' }] })
+
+  const result = rewriteMessages(messages, { retainRecent: 4 })
+  assert(result.saved > 0, `rewrite saved=${result.saved}`)
+  assert(result.messages.length === messages.length, 'messages must not be removed')
+  assert(result.messages[2].toolCallId === 'call_0', 'tool pairing id must be preserved')
+  assert(!JSON.stringify(result.messages[1]).includes('<thought>'), 'CoT must be stripped')
+  assert(result.messages[result.messages.length - 1].content[0].text === '继续', 'recent messages must stay raw')
+})
 
 check('memory.savings-accounting', () => {
   const entries: MemoryEntry[] = []

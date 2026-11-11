@@ -17,6 +17,8 @@
 
 import { estimateTokens } from '../contracts'
 import { logEvent } from '../log'
+import type { RewriteResult } from './history-rewriter'
+import { replayChunks, type ResponseCache } from './response-cache'
 
 export interface SchemaStats {
   changed: number
@@ -159,7 +161,15 @@ export interface SchemaCompressorOptions {
     savedTokens: number
     toolsBeforeTokens: number
     toolsAfterTokens: number
+    rewriteSaved?: number
+    rewriteBeforeTokens?: number
+    rewriteAfterTokens?: number
   }) => void
+  /** 请求级历史重写（v1.2）：只改 messages 内容，不删除/重排消息。 */
+  rewriteHistory?: (messages: any) => RewriteResult | null
+  /** 精确哈希响应缓存（v1.2）：命中时直接重放 chunk。 */
+  responseCache?: ResponseCache
+  onCacheHit?: () => void
 }
 
 /** 粗略估算消息侧 token（4 字符/token），用于面板比例的分母。 */
@@ -206,17 +216,25 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
 
   const transform = (request: any): any => {
     try {
-      const messagesTokens = estimateMessagesTokens(request?.messages)
-      if (!request || !Array.isArray(request.tools) || request.tools.length === 0) {
+      if (!request) return request
+      const rewrite = options.rewriteHistory?.(request.messages) ?? null
+      const messages = rewrite?.messages ?? request.messages
+      const messagesTokens = estimateMessagesTokens(messages)
+      const rewriteSaved = rewrite?.saved ?? 0
+      const rewriteBeforeTokens = rewrite?.beforeTokens ?? messagesTokens
+      if (!Array.isArray(request.tools) || request.tools.length === 0) {
         options.onRequest?.({
-          sessionId: String(request?.sessionId ?? ''),
-          beforeTokens: messagesTokens,
+          sessionId: String(request.sessionId ?? ''),
+          beforeTokens: rewriteBeforeTokens,
           afterTokens: messagesTokens,
           savedTokens: 0,
           toolsBeforeTokens: 0,
           toolsAfterTokens: 0,
+          rewriteSaved,
+          rewriteBeforeTokens,
+          rewriteAfterTokens: messagesTokens,
         })
-        return request
+        return rewrite ? { ...request, messages } : request
       }
 
       const toolsBeforeChars = JSON.stringify(request.tools).length
@@ -234,11 +252,14 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
       const toolsAfterTokens = Math.ceil(JSON.stringify(compressed.tools).length / 4)
       options.onRequest?.({
         sessionId: String(request.sessionId ?? ''),
-        beforeTokens: messagesTokens + toolsBeforeTokens,
+        beforeTokens: rewriteBeforeTokens + toolsBeforeTokens,
         afterTokens: messagesTokens + toolsAfterTokens,
         savedTokens: compressed.stats.tokensSaved,
         toolsBeforeTokens,
         toolsAfterTokens,
+        rewriteSaved,
+        rewriteBeforeTokens,
+        rewriteAfterTokens: messagesTokens,
       })
       if (compressed.stats.changed === 0 && hidden.length === 0) return request
       options.onSavings?.(compressed.stats.tokensSaved)
@@ -258,7 +279,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
         })
       }
 
-      return { ...request, tools: compressed.tools }
+      return { ...request, messages, tools: compressed.tools }
     } catch (error) {
       logEvent('warn', 'schema.compress_failed', { error: String(error) })
       return request
@@ -268,16 +289,46 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   const originalStream = llm.stream
   const originalPrepare = llm.prepareCall
 
+  const runOptimized = (invoke: (request: any) => any, request: any): any => {
+    const optimized = transform(request)
+    const cache = options.responseCache
+    if (!cache) return invoke(optimized)
+    let key: string
+    try {
+      key = cache.keyFor(optimized)
+    } catch {
+      return invoke(optimized)
+    }
+    const hit = cache.get(key)
+    if (hit) {
+      options.onCacheHit?.()
+      return replayChunks(hit)
+    }
+    const stream = invoke(optimized)
+    return (async function* () {
+      const chunks: any[] = []
+      for await (const chunk of stream) {
+        chunks.push(chunk)
+        yield chunk
+      }
+      cache.set(key, chunks)
+    })()
+  }
+
   try {
     llm.stream = function patchedStream(this: any, request: any) {
-      return originalStream.call(this, transform(request))
+      const self = this
+      return runOptimized((optimized) => originalStream.call(self, optimized), request)
     }
     if (typeof originalPrepare === 'function') {
       llm.prepareCall = async function patchedPrepare(this: any, config: any, signal?: any, configure?: any) {
         const prepared = await originalPrepare.call(this, config, signal, configure)
         if (!prepared || typeof prepared.stream !== 'function') return prepared
         const preparedStream = prepared.stream
-        return { ...prepared, stream: (request: any) => preparedStream.call(prepared, transform(request)) }
+        return {
+          ...prepared,
+          stream: (request: any) => runOptimized((optimized) => preparedStream.call(prepared, optimized), request),
+        }
       }
     }
   } catch (error) {

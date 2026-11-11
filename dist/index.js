@@ -63,6 +63,8 @@ const breaker_1 = require("./modules/breaker");
 const dedup_bus_1 = require("./modules/dedup-bus");
 const savings_ledger_1 = require("./modules/savings-ledger");
 const workspace_1 = require("./modules/workspace");
+const history_rewriter_1 = require("./modules/history-rewriter");
+const response_cache_1 = require("./modules/response-cache");
 exports.name = 'dsh-context-manager';
 exports.inject = ['systemPrompt', 'tools', 'sessions', 'agents'];
 exports.Config = zod_1.z.object({
@@ -84,6 +86,14 @@ exports.Config = zod_1.z.object({
     firewallTokens: zod_1.z.number().int().positive().default(250),
     /** 会话总回合数预估，用于 CacheAnchor 的寿命摊销（默认 40：约 2× 冷读回本线）。 */
     assumedTurns: zod_1.z.number().int().positive().default(40),
+    /** 请求级历史重写（v1.2）：只改 messages 内容，不动 session surface。 */
+    rewriteEnabled: zod_1.z.boolean().default(true),
+    rewriteRetainRecent: zod_1.z.number().int().positive().default(8),
+    rewriteToolChars: zod_1.z.number().int().positive().default(700),
+    rewriteAssistantChars: zod_1.z.number().int().positive().default(400),
+    /** 精确哈希响应缓存（v1.2）：同一请求 5 分钟内直接重放。 */
+    responseCacheEnabled: zod_1.z.boolean().default(true),
+    responseCacheTtlMs: zod_1.z.number().int().positive().default(300_000),
     /** 是否真正发起本地路由请求（决策与日志始终开启）。 */
     localRouting: zod_1.z.boolean().default(false),
     /** spill 目录保留的最大文件数。 */
@@ -299,6 +309,7 @@ function apply(ctx, rawConfig = {}) {
     const breaker = new breaker_1.CompressionBreaker({ name: 'extraction', failureThreshold: 3, cooldownMs: 10 * 60_000 });
     const dedup = new dedup_bus_1.DedupBus(256);
     const ledger = new savings_ledger_1.SavingsLedger();
+    const responseCache = new response_cache_1.ResponseCache({ ttlMs: config.responseCacheTtlMs });
     const savingsMarkdown = path.resolve(process.cwd(), 'savings.md');
     const savingsJson = path.resolve(process.cwd(), 'savings.json');
     let savingsTimer = null;
@@ -413,11 +424,30 @@ function apply(ctx, rawConfig = {}) {
         const dispose = (0, schema_index_1.installSchemaCompressor)({ llm, get: () => undefined }, {
             enabled: true,
             maxDescriptionChars: 120,
-            onRequest: ({ sessionId, beforeTokens, afterTokens, savedTokens, toolsBeforeTokens }) => {
+            rewriteHistory: config.rewriteEnabled
+                ? (messages) => (0, history_rewriter_1.rewriteMessages)(messages, {
+                    retainRecent: config.rewriteRetainRecent,
+                    assistantChars: config.rewriteAssistantChars,
+                    toolChars: config.rewriteToolChars,
+                })
+                : undefined,
+            responseCache: config.responseCacheEnabled ? responseCache : undefined,
+            onCacheHit: () => (0, log_1.logEvent)('info', 'cache.response_hit', responseCache.stats()),
+            onRequest: ({ sessionId, beforeTokens, afterTokens, savedTokens, toolsBeforeTokens, rewriteSaved, rewriteBeforeTokens, rewriteAfterTokens, }) => {
                 const workspace = sessionWorkspaces.get(sessionId) ?? (0, workspace_1.workspaceRef)('(unknown)');
                 ledger.recordRequestTokens(workspace, beforeTokens, afterTokens);
                 if (savedTokens > 0) {
                     ledger.record('schema', savedTokens, 'tool schema descriptions', workspace, toolsBeforeTokens);
+                }
+                if ((rewriteSaved ?? 0) > 0) {
+                    ledger.record('extraction', rewriteSaved, 'history-rewrite', workspace, rewriteBeforeTokens);
+                    (0, log_1.logEvent)('info', 'context.rewritten', {
+                        module: 'HistoryRewriter',
+                        sessionId,
+                        beforeTokens: rewriteBeforeTokens,
+                        afterTokens: rewriteAfterTokens,
+                        saved: rewriteSaved,
+                    });
                 }
                 scheduleSavings();
             },

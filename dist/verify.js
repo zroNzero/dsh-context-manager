@@ -388,6 +388,60 @@ async function main() {
         assert(Number(last.remainingTurns) > 0, 'remainingTurns missing in decision log');
         dispose4();
     });
+    await check('request history rewrite compacts old messages', async () => {
+        const ctx5 = { systemPrompt: { section: () => () => { } }, tools: { register: () => () => { } }, on: () => () => { } };
+        const captured5 = [];
+        ctx5.llm = {
+            stream(request) {
+                captured5.push(request);
+                return (async function* () { })();
+            },
+        };
+        const dispose5 = (0, index_1.apply)(ctx5, cfg);
+        const messages = [{ role: 'user', content: [{ type: 'text', text: '需求' }] }];
+        for (let index = 0; index < 10; index += 1) {
+            messages.push({ role: 'assistant', content: [{ type: 'text', text: `<thought>secret plan</thought> 决定 ${index} ${'a'.repeat(600)}` }] });
+            messages.push({ role: 'tool', toolCallId: `call_${index}`, content: [{ type: 'text', text: `line ${'b'.repeat(80)}\n`.repeat(30) }] });
+        }
+        messages.push({ role: 'user', content: [{ type: 'text', text: '继续' }] });
+        const tools = Array.from({ length: 10 }, (_, index) => ({
+            name: `t${index}`,
+            description: 'description '.repeat(30),
+            parameters: { type: 'object', properties: {} },
+        }));
+        const before = (0, contracts_1.estimateTokens)(JSON.stringify(messages));
+        ctx5.llm.stream({ provider: 'p', model: 'm', messages, tools });
+        const sent = captured5[0];
+        const after = (0, contracts_1.estimateTokens)(JSON.stringify(sent.messages));
+        assert(after < before * 0.75, `rewrite ineffective: ${before}->${after}`);
+        assert(sent.messages.length === messages.length, 'messages must not be removed');
+        assert(sent.messages[2].toolCallId === 'call_0', 'tool pairing id must be preserved');
+        assert(!JSON.stringify(sent.messages[1]).includes('<thought>'), 'CoT must be stripped');
+        dispose5();
+    });
+    await check('response cache replays identical request', async () => {
+        const ctx6 = { systemPrompt: { section: () => () => { } }, tools: { register: () => () => { } }, on: () => () => { } };
+        let calls = 0;
+        ctx6.llm = {
+            stream() {
+                calls += 1;
+                return (async function* () {
+                    yield { type: 'text', text: 'hello' };
+                })();
+            },
+        };
+        const dispose6 = (0, index_1.apply)(ctx6, cfg);
+        const request = { provider: 'p', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], tools: [{ name: 't', description: 'd', parameters: {} }] };
+        const first = [];
+        for await (const chunk of ctx6.llm.stream(request))
+            first.push(chunk);
+        const second = [];
+        for await (const chunk of ctx6.llm.stream(request))
+            second.push(chunk);
+        assert(calls === 1, `response cache missed: calls=${calls}`);
+        assert(JSON.stringify(first) === JSON.stringify(second), 'cached chunks mismatch');
+        dispose6();
+    });
     await check('no console.log in sources', () => {
         const dir = node_path_1.default.resolve('src');
         const offenders = [];

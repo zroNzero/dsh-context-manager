@@ -35,6 +35,8 @@ import { CompressionBreaker } from './modules/breaker'
 import { DedupBus, dedupeKey } from './modules/dedup-bus'
 import { SavingsLedger } from './modules/savings-ledger'
 import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modules/workspace'
+import { rewriteMessages } from './modules/history-rewriter'
+import { ResponseCache } from './modules/response-cache'
 
 export const name = 'dsh-context-manager'
 export const inject = ['systemPrompt', 'tools', 'sessions', 'agents']
@@ -58,6 +60,14 @@ export const Config = z.object({
   firewallTokens: z.number().int().positive().default(250),
   /** 会话总回合数预估，用于 CacheAnchor 的寿命摊销（默认 40：约 2× 冷读回本线）。 */
   assumedTurns: z.number().int().positive().default(40),
+  /** 请求级历史重写（v1.2）：只改 messages 内容，不动 session surface。 */
+  rewriteEnabled: z.boolean().default(true),
+  rewriteRetainRecent: z.number().int().positive().default(8),
+  rewriteToolChars: z.number().int().positive().default(700),
+  rewriteAssistantChars: z.number().int().positive().default(400),
+  /** 精确哈希响应缓存（v1.2）：同一请求 5 分钟内直接重放。 */
+  responseCacheEnabled: z.boolean().default(true),
+  responseCacheTtlMs: z.number().int().positive().default(300_000),
   /** 是否真正发起本地路由请求（决策与日志始终开启）。 */
   localRouting: z.boolean().default(false),
   /** spill 目录保留的最大文件数。 */
@@ -284,6 +294,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   const breaker = new CompressionBreaker({ name: 'extraction', failureThreshold: 3, cooldownMs: 10 * 60_000 })
   const dedup = new DedupBus(256)
   const ledger = new SavingsLedger()
+  const responseCache = new ResponseCache({ ttlMs: config.responseCacheTtlMs })
   const savingsMarkdown = path.resolve(process.cwd(), 'savings.md')
   const savingsJson = path.resolve(process.cwd(), 'savings.json')
   let savingsTimer: ReturnType<typeof setTimeout> | null = null
@@ -395,11 +406,40 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     const dispose = installSchemaCompressor({ llm, get: () => undefined } as any, {
       enabled: true,
       maxDescriptionChars: 120,
-      onRequest: ({ sessionId, beforeTokens, afterTokens, savedTokens, toolsBeforeTokens }) => {
+      rewriteHistory: config.rewriteEnabled
+        ? (messages: any) =>
+            rewriteMessages(messages, {
+              retainRecent: config.rewriteRetainRecent,
+              assistantChars: config.rewriteAssistantChars,
+              toolChars: config.rewriteToolChars,
+            })
+        : undefined,
+      responseCache: config.responseCacheEnabled ? responseCache : undefined,
+      onCacheHit: () => logEvent('info', 'cache.response_hit', responseCache.stats()),
+      onRequest: ({
+        sessionId,
+        beforeTokens,
+        afterTokens,
+        savedTokens,
+        toolsBeforeTokens,
+        rewriteSaved,
+        rewriteBeforeTokens,
+        rewriteAfterTokens,
+      }) => {
         const workspace = sessionWorkspaces.get(sessionId) ?? workspaceRef('(unknown)')
         ledger.recordRequestTokens(workspace, beforeTokens, afterTokens)
         if (savedTokens > 0) {
           ledger.record('schema', savedTokens, 'tool schema descriptions', workspace, toolsBeforeTokens)
+        }
+        if ((rewriteSaved ?? 0) > 0) {
+          ledger.record('extraction', rewriteSaved!, 'history-rewrite', workspace, rewriteBeforeTokens)
+          logEvent('info', 'context.rewritten', {
+            module: 'HistoryRewriter',
+            sessionId,
+            beforeTokens: rewriteBeforeTokens,
+            afterTokens: rewriteAfterTokens,
+            saved: rewriteSaved,
+          })
         }
         scheduleSavings()
       },

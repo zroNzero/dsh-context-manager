@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.2.0 — 2026-11-11
+
+### 请求级历史重写 + 精确哈希响应缓存（不碰 session surface）
+
+- **HistoryRewriter**：在 `llm.stream` 发送前重写 `request.messages`：
+  - 旧 tool 结果 → 头/尾/错误行 + 重跑提示；
+  - 旧 assistant 文本 → 剥离 CoT、截断；
+  - user / system / 最近 N 条保持原样。
+  只改 content、不删除不重排消息，`toolCallId` 配对完全保留，不会复现孤儿 tool/call。
+  实测：`8,042 → 4,788 tokens（-40.4%）`，日志 `context.rewritten`。
+- **ResponseCache**：按 `model + messages + tools` 精确哈希缓存流式响应，
+  TTL 5 分钟、32 条 / 8MB；命中直接重放，日志 `cache.response_hit`。
+- 新增配置：`rewriteEnabled`（默认 true）、`rewriteRetainRecent`(8)、
+  `rewriteToolChars`(700)、`rewriteAssistantChars`(400)、
+  `responseCacheEnabled`(true)、`responseCacheTtlMs`(300000)。
+- 测试：`self-test 10/10`、`verify 18/18`（新增请求级重写与缓存重放断言）。
+
 ## v1.1.0 — 2026-11-11
 
 ### A 杠杆：上下文防火墙（Pointer-First） + B 杠杆：寿命摊销

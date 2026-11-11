@@ -25,6 +25,12 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     extractionTokens: z.ZodDefault<z.ZodNumber>;
     firewallTokens: z.ZodDefault<z.ZodNumber>;
     assumedTurns: z.ZodDefault<z.ZodNumber>;
+    rewriteEnabled: z.ZodDefault<z.ZodBoolean>;
+    rewriteRetainRecent: z.ZodDefault<z.ZodNumber>;
+    rewriteToolChars: z.ZodDefault<z.ZodNumber>;
+    rewriteAssistantChars: z.ZodDefault<z.ZodNumber>;
+    responseCacheEnabled: z.ZodDefault<z.ZodBoolean>;
+    responseCacheTtlMs: z.ZodDefault<z.ZodNumber>;
     localRouting: z.ZodDefault<z.ZodBoolean>;
     spillMaxFiles: z.ZodDefault<z.ZodNumber>;
     spillTtlHours: z.ZodDefault<z.ZodNumber>;

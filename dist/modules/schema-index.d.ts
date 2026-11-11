@@ -14,6 +14,8 @@
  * 可选的 selectStableToolSet 仅作为实验开关：按首轮意图固定一个子集，
  * 并在会话内保持稳定；默认关闭，避免模型在后续轮次需要被裁掉的工具。
  */
+import type { RewriteResult } from './history-rewriter';
+import { type ResponseCache } from './response-cache';
 export interface SchemaStats {
     changed: number;
     charsBefore: number;
@@ -61,7 +63,15 @@ export interface SchemaCompressorOptions {
         savedTokens: number;
         toolsBeforeTokens: number;
         toolsAfterTokens: number;
+        rewriteSaved?: number;
+        rewriteBeforeTokens?: number;
+        rewriteAfterTokens?: number;
     }) => void;
+    /** 请求级历史重写（v1.2）：只改 messages 内容，不删除/重排消息。 */
+    rewriteHistory?: (messages: any) => RewriteResult | null;
+    /** 精确哈希响应缓存（v1.2）：命中时直接重放 chunk。 */
+    responseCache?: ResponseCache;
+    onCacheHit?: () => void;
 }
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。

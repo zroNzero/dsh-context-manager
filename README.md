@@ -114,6 +114,9 @@ dsh install D:\path\to\dsh-context-manager
         extractionTokens: 500
         firewallTokens: 250
         assumedTurns: 40
+        rewriteEnabled: true
+        rewriteRetainRecent: 8
+        responseCacheEnabled: true
         compressionBudgetMs: 50
         localRouting: false
         spillMaxFiles: 50

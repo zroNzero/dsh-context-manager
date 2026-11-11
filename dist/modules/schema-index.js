@@ -22,6 +22,7 @@ exports.installSchemaCompressor = installSchemaCompressor;
 exports.schemaTokens = schemaTokens;
 const contracts_1 = require("../contracts");
 const log_1 = require("../log");
+const response_cache_1 = require("./response-cache");
 function truncateText(value, maxChars) {
     const points = Array.from(value);
     if (points.length <= maxChars)
@@ -176,17 +177,26 @@ function installSchemaCompressor(ctx, options = {}) {
     let lastLogKey = '';
     const transform = (request) => {
         try {
-            const messagesTokens = estimateMessagesTokens(request?.messages);
-            if (!request || !Array.isArray(request.tools) || request.tools.length === 0) {
+            if (!request)
+                return request;
+            const rewrite = options.rewriteHistory?.(request.messages) ?? null;
+            const messages = rewrite?.messages ?? request.messages;
+            const messagesTokens = estimateMessagesTokens(messages);
+            const rewriteSaved = rewrite?.saved ?? 0;
+            const rewriteBeforeTokens = rewrite?.beforeTokens ?? messagesTokens;
+            if (!Array.isArray(request.tools) || request.tools.length === 0) {
                 options.onRequest?.({
-                    sessionId: String(request?.sessionId ?? ''),
-                    beforeTokens: messagesTokens,
+                    sessionId: String(request.sessionId ?? ''),
+                    beforeTokens: rewriteBeforeTokens,
                     afterTokens: messagesTokens,
                     savedTokens: 0,
                     toolsBeforeTokens: 0,
                     toolsAfterTokens: 0,
+                    rewriteSaved,
+                    rewriteBeforeTokens,
+                    rewriteAfterTokens: messagesTokens,
                 });
-                return request;
+                return rewrite ? { ...request, messages } : request;
             }
             const toolsBeforeChars = JSON.stringify(request.tools).length;
             let tools = request.tools;
@@ -201,11 +211,14 @@ function installSchemaCompressor(ctx, options = {}) {
             const toolsAfterTokens = Math.ceil(JSON.stringify(compressed.tools).length / 4);
             options.onRequest?.({
                 sessionId: String(request.sessionId ?? ''),
-                beforeTokens: messagesTokens + toolsBeforeTokens,
+                beforeTokens: rewriteBeforeTokens + toolsBeforeTokens,
                 afterTokens: messagesTokens + toolsAfterTokens,
                 savedTokens: compressed.stats.tokensSaved,
                 toolsBeforeTokens,
                 toolsAfterTokens,
+                rewriteSaved,
+                rewriteBeforeTokens,
+                rewriteAfterTokens: messagesTokens,
             });
             if (compressed.stats.changed === 0 && hidden.length === 0)
                 return request;
@@ -224,7 +237,7 @@ function installSchemaCompressor(ctx, options = {}) {
                     charsAfter: compressed.stats.charsAfter,
                 });
             }
-            return { ...request, tools: compressed.tools };
+            return { ...request, messages, tools: compressed.tools };
         }
         catch (error) {
             (0, log_1.logEvent)('warn', 'schema.compress_failed', { error: String(error) });
@@ -233,9 +246,37 @@ function installSchemaCompressor(ctx, options = {}) {
     };
     const originalStream = llm.stream;
     const originalPrepare = llm.prepareCall;
+    const runOptimized = (invoke, request) => {
+        const optimized = transform(request);
+        const cache = options.responseCache;
+        if (!cache)
+            return invoke(optimized);
+        let key;
+        try {
+            key = cache.keyFor(optimized);
+        }
+        catch {
+            return invoke(optimized);
+        }
+        const hit = cache.get(key);
+        if (hit) {
+            options.onCacheHit?.();
+            return (0, response_cache_1.replayChunks)(hit);
+        }
+        const stream = invoke(optimized);
+        return (async function* () {
+            const chunks = [];
+            for await (const chunk of stream) {
+                chunks.push(chunk);
+                yield chunk;
+            }
+            cache.set(key, chunks);
+        })();
+    };
     try {
         llm.stream = function patchedStream(request) {
-            return originalStream.call(this, transform(request));
+            const self = this;
+            return runOptimized((optimized) => originalStream.call(self, optimized), request);
         };
         if (typeof originalPrepare === 'function') {
             llm.prepareCall = async function patchedPrepare(config, signal, configure) {
@@ -243,7 +284,10 @@ function installSchemaCompressor(ctx, options = {}) {
                 if (!prepared || typeof prepared.stream !== 'function')
                     return prepared;
                 const preparedStream = prepared.stream;
-                return { ...prepared, stream: (request) => preparedStream.call(prepared, transform(request)) };
+                return {
+                    ...prepared,
+                    stream: (request) => runOptimized((optimized) => preparedStream.call(prepared, optimized), request),
+                };
             };
         }
     }

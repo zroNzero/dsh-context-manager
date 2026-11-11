@@ -14,6 +14,7 @@ const node_path_1 = __importDefault(require("node:path"));
 const cacheAnchor_1 = require("./cacheAnchor");
 const extraction_1 = require("./modules/extraction");
 const contracts_1 = require("./contracts");
+const history_rewriter_1 = require("./modules/history-rewriter");
 const memory_1 = require("./modules/memory");
 const host_sim_1 = require("./host-sim");
 const savings_ledger_1 = require("./modules/savings-ledger");
@@ -172,6 +173,24 @@ check('host-sim.incident-replay', () => {
 // ---------------------------------------------------------------------------
 // 6) 折叠记账口径（2026-11-10 面板数字虚高事故）
 // ---------------------------------------------------------------------------
+check('history-rewriter.preserves-pairing', () => {
+    const messages = [{ role: 'user', content: [{ type: 'text', text: '需求' }] }];
+    for (let index = 0; index < 12; index += 1) {
+        messages.push({ role: 'assistant', content: [{ type: 'text', text: `<thought>plan ${index}</thought> 决定 ${'a'.repeat(800)}` }] });
+        messages.push({
+            role: 'tool',
+            toolCallId: `call_${index}`,
+            content: [{ type: 'text', text: Array.from({ length: 40 }, (_, line) => `line ${line} ${'b'.repeat(60)}`).join('\n') }],
+        });
+    }
+    messages.push({ role: 'user', content: [{ type: 'text', text: '继续' }] });
+    const result = (0, history_rewriter_1.rewriteMessages)(messages, { retainRecent: 4 });
+    assert(result.saved > 0, `rewrite saved=${result.saved}`);
+    assert(result.messages.length === messages.length, 'messages must not be removed');
+    assert(result.messages[2].toolCallId === 'call_0', 'tool pairing id must be preserved');
+    assert(!JSON.stringify(result.messages[1]).includes('<thought>'), 'CoT must be stripped');
+    assert(result.messages[result.messages.length - 1].content[0].text === '继续', 'recent messages must stay raw');
+});
 check('memory.savings-accounting', () => {
     const entries = [];
     for (let index = 0; index < 20; index += 1) {
