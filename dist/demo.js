@@ -26,6 +26,10 @@ const breaker_1 = require("./modules/breaker");
 const tool_attention_1 = require("./modules/tool-attention");
 const extraction_1 = require("./modules/extraction");
 const response_cache_1 = require("./modules/response-cache");
+const scope_1 = require("./modules/scope");
+const osiris_1 = require("./modules/osiris");
+const tool_attention_2 = require("./modules/tool-attention");
+const tool_pipe_1 = require("./modules/tool-pipe");
 const write = (line) => {
     process.stdout.write(`${line}\n`);
 };
@@ -297,6 +301,26 @@ async function main() {
         tokensBefore: attentionBefore,
         tokensAfter: attentionAfter,
     });
+    const budget = (0, scope_1.planBudget)(20000, attentionBefore);
+    (0, log_1.logEvent)('info', 'scope.budget', { module: 'SCOPE', ...budget });
+    const seal = (0, osiris_1.sealState)({
+        messages: [{ role: 'user', content: 'run the failing test and read the auth file' }],
+        tools: attentionTools,
+        bucket: (0, osiris_1.intentBucket)('run the failing test and read the auth file'),
+        keepRecent: budget.retainRecent,
+    });
+    (0, log_1.logEvent)('info', 'osiris.seal', { module: 'OSIRIS', ...seal });
+    const scout = (0, tool_attention_2.selectToolsScout)(attentionTools, 'run the failing test and read the auth file', 5);
+    (0, log_1.logEvent)('info', 'scout.route', { module: 'SCOUT', total: 80, selected: scout.selected.length, top: scout.scoreboard.slice(0, 5) });
+    const pipeDir = node_path_1.default.join('.demo-spill', 'pipe');
+    node_fs_1.default.mkdirSync(pipeDir, { recursive: true });
+    const pipeFile = node_path_1.default.join(pipeDir, 'demo-payload.txt');
+    node_fs_1.default.writeFileSync(pipeFile, 'pipe payload for demo', 'utf8');
+    const pipe = new tool_pipe_1.ToolPipe(pipeDir);
+    const pipePublished = pipe.publishFile(pipeFile);
+    const pipeRead = pipe.resolve(pipePublished.ref);
+    (0, log_1.logEvent)('info', 'toolpipe.publish', { module: 'ToolPipe', ref: pipePublished.ref, bytes: pipePublished.bytes });
+    (0, log_1.logEvent)('info', 'toolpipe.read', { module: 'ToolPipe', ref: pipePublished.ref, ok: pipeRead.ok, bytes: pipeRead.bytes });
     const toonRows = Array.from({ length: 120 }, (_, index) => ({
         id: index,
         level: 'info',
@@ -353,6 +377,8 @@ async function main() {
         : 'not applicable'}`);
     write(`[13] semantic cache: ${semanticHit ? `hit score=${semanticHit.score.toFixed(3)}` : 'miss'}`);
     write(`[14] routing probe: ${localProbeOk ? 'local available' : 'local unavailable'} | local_hit=${localRoute.result.route === 'local'}`);
+    write(`[15] scope: tools=${budget.toolsBudget} memory=${budget.memoryBudget} live=${budget.liveBudget} retain=${budget.retainRecent} | osiris toolsHash=${seal.toolsHash.slice(0, 8)}`);
+    write(`[16] toolpipe: ref=${pipePublished.ref} bytes=${pipePublished.bytes} read=${pipeRead.ok}`);
     (0, log_1.logEvent)('info', 'demo.summary', {
         pipelineSaved: pipelineBefore - pipelineAfter,
         pipelineMs,

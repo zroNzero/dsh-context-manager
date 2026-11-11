@@ -37,6 +37,7 @@ import { SavingsLedger } from './modules/savings-ledger'
 import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modules/workspace'
 import { rewriteMessages } from './modules/history-rewriter'
 import { ResponseCache } from './modules/response-cache'
+import { ToolPipe } from './modules/tool-pipe'
 
 export const name = 'dsh-context-manager'
 export const inject = ['systemPrompt', 'tools', 'sessions', 'agents']
@@ -302,6 +303,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   const dedup = new DedupBus(256)
   const ledger = new SavingsLedger()
   const responseCache = new ResponseCache({ ttlMs: config.responseCacheTtlMs, similarityThreshold: config.semanticCacheThreshold })
+  const toolPipe = new ToolPipe(path.resolve(config.spillDir))
   const toolSchemas = new Map<string, any>()
   let localAvailable = false
 
@@ -459,6 +461,35 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     logEvent('warn', 'search_tools.register.failed', { error: String(error) })
   }
 
+  // v2.0：ToolPipe 数据平面——按 [PIPE] ref 取回落盘原文。
+  try {
+    const pipeDisposer = services.tools?.register?.({
+      name: 'read_ref',
+      description: 'Read the full content of a spilled tool result by its [PIPE] ref (e.g. pipe-1a2b3c4d5e6f).',
+      parameters: {
+        ref: { type: 'string', description: 'PIPE reference', required: true },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          properties: { ok: { type: 'boolean' }, text: { type: 'string' } },
+          required: ['ok', 'text'],
+          additionalProperties: false,
+        },
+        render: (value: any) => [{ type: 'text', text: String(value?.text ?? '') }],
+      },
+      execute: async (exec: any) => {
+        const ref = String(exec?.parameters?.ref ?? exec?.ref ?? '')
+        const result = toolPipe.resolve(ref)
+        logEvent('info', 'toolpipe.read', { module: 'ToolPipe', ref, ok: result.ok, bytes: result.bytes })
+        return { ok: result.ok, text: result.text.slice(0, 20000) }
+      },
+    })
+    if (typeof pipeDisposer === 'function') disposers.push(pipeDisposer)
+  } catch (error) {
+    logEvent('warn', 'read_ref.register.failed', { error: String(error) })
+  }
+
   // Schema 压缩依赖 llm 服务。真实 DSH 里 llm 可能挂在 agent 作用域而非 profile 根，
   // 因此既在根 ctx 上重试，也在首条 pre-step 的 payload.agent.loopCtx.llm 上补装。
   const pendingTimers: Array<ReturnType<typeof setTimeout>> = []
@@ -471,11 +502,11 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       enabled: true,
       maxDescriptionChars: 120,
       rewriteHistory: config.rewriteEnabled
-        ? (messages: any) =>
+        ? (messages: any, budget?: any) =>
             rewriteMessages(messages, {
-              retainRecent: config.rewriteRetainRecent,
-              assistantChars: config.rewriteAssistantChars,
-              toolChars: config.rewriteToolChars,
+              retainRecent: budget?.retainRecent ?? config.rewriteRetainRecent,
+              assistantChars: budget?.assistantChars ?? config.rewriteAssistantChars,
+              toolChars: budget?.toolChars ?? config.rewriteToolChars,
             })
         : undefined,
       responseCache: config.responseCacheEnabled ? responseCache : undefined,
@@ -664,11 +695,14 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         })
       }
 
-      const finalText = admitted.admitted
-        ? compressed === text
-          ? admitted.text
-          : `${compressed}\n\n${admitted.text}`
-        : compressed
+      let pipeLine = ''
+      if (admitted.admitted && admitted.spilledTo) {
+        const published = toolPipe.publishFile(admitted.spilledTo)
+        pipeLine = `\n[PIPE] ref=${published.ref}`
+        logEvent('info', 'toolpipe.publish', { module: 'ToolPipe', ref: published.ref, bytes: published.bytes })
+      }
+      const finalText =
+        (admitted.admitted ? (compressed === text ? admitted.text : `${compressed}\n\n${admitted.text}`) : compressed) + pipeLine
 
       const tokensAfter = estimateTokens(finalText)
       const saved = Math.max(0, tokensBefore - tokensAfter)

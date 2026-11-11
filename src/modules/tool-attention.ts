@@ -83,6 +83,65 @@ export function selectTools(tools: readonly ToolLike[], prompt: string, topK = 5
   }
 }
 
+/** SCOUT：BM25 轻量打分（IDF 抑制高频词），比纯意图命中更稳。 */
+export function selectToolsScout(tools: readonly ToolLike[], prompt: string, topK = 5): ToolSelection {
+  const intent = tokenize(prompt)
+  const intentSet = new Set(intent)
+  const docs = tools.map((tool) => new Set(tokenize(`${tool.name} ${tool.description ?? ''}`)))
+  const df = new Map<string, number>()
+  for (const doc of docs) for (const token of doc) df.set(token, (df.get(token) ?? 0) + 1)
+  const total = Math.max(1, docs.length)
+  const idf = (token: string): number => Math.log(1 + (total - (df.get(token) ?? 0) + 0.5) / ((df.get(token) ?? 0) + 0.5))
+  const avgLength = docs.reduce((sum, doc) => sum + doc.size, 0) / total
+
+  const scored = tools.map((tool, index) => {
+    const doc = docs[index]!
+    const nameTokens = new Set(tokenize(tool.name))
+    let score = 0
+    for (const token of new Set(intent)) {
+      if (!doc.has(token)) continue
+      const weight = (nameTokens.has(token) ? 2.5 : 1) * idf(token)
+      const tf = 1
+      const k1 = 1.2
+      const b = 0.75
+      score += weight * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (doc.size / Math.max(1, avgLength)))))
+    }
+    return { tool, score }
+  })
+  scored.sort((left, right) => (right.score - left.score) || left.tool.name.localeCompare(right.tool.name))
+
+  const hasSearchTool = tools.some((tool) => tool.name === 'search_tools')
+  const limit = Math.max(1, topK) - (hasSearchTool ? 0 : 1)
+  const top = scored.slice(0, Math.max(1, limit))
+  const hidden = scored.slice(top.length)
+  const selected = top.map((item) => item.tool)
+  if (!hasSearchTool) selected.push(SEARCH_TOOLS_DEF)
+  return {
+    selected,
+    catalog: hidden.map((item) => `- ${item.tool.name}: ${firstSentence(item.tool.description ?? '')}`),
+    hidden: hidden.map((item) => item.tool.name),
+    scoreboard: scored.map((item) => ({ name: item.tool.name, score: Number(item.score.toFixed(3)) })),
+  }
+}
+
+/** 由「已锁定工具名集合」重建 selection（OSIRIS 稳定锚定用）。 */
+export function selectionFromNames(tools: readonly ToolLike[], names: readonly string[]): ToolSelection | null {
+  const byName = new Map(tools.map((tool) => [tool.name, tool]))
+  const selected = names.map((name) => byName.get(name)).filter((tool): tool is ToolLike => tool !== undefined)
+  if (selected.length === 0) return null
+  const selectedNames = new Set(selected.map((tool) => tool.name))
+  const hidden = tools.filter((tool) => !selectedNames.has(tool.name))
+  if (!selectedNames.has('search_tools') && !tools.some((tool) => tool.name === 'search_tools')) {
+    selected.push(SEARCH_TOOLS_DEF)
+  }
+  return {
+    selected,
+    catalog: hidden.map((tool) => `- ${tool.name}: ${firstSentence(tool.description ?? '')}`),
+    hidden: hidden.map((tool) => tool.name),
+    scoreboard: [],
+  }
+}
+
 /** 把目录行并入 system 消息（不新建、不重排其它消息）。 */
 export function withCatalog(messages: any[], catalog: string[]): any[] {
   if (catalog.length === 0) return messages

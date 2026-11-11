@@ -28,5 +28,9 @@ export interface ToolSelection {
     }>;
 }
 export declare function selectTools(tools: readonly ToolLike[], prompt: string, topK?: number): ToolSelection;
+/** SCOUT：BM25 轻量打分（IDF 抑制高频词），比纯意图命中更稳。 */
+export declare function selectToolsScout(tools: readonly ToolLike[], prompt: string, topK?: number): ToolSelection;
+/** 由「已锁定工具名集合」重建 selection（OSIRIS 稳定锚定用）。 */
+export declare function selectionFromNames(tools: readonly ToolLike[], names: readonly string[]): ToolSelection | null;
 /** 把目录行并入 system 消息（不新建、不重排其它消息）。 */
 export declare function withCatalog(messages: any[], catalog: string[]): any[];

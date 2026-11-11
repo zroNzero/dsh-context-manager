@@ -15,6 +15,9 @@ const cacheAnchor_1 = require("./cacheAnchor");
 const extraction_1 = require("./modules/extraction");
 const tool_attention_1 = require("./modules/tool-attention");
 const response_cache_1 = require("./modules/response-cache");
+const scope_1 = require("./modules/scope");
+const osiris_1 = require("./modules/osiris");
+const tool_pipe_1 = require("./modules/tool-pipe");
 const contracts_1 = require("./contracts");
 const history_rewriter_1 = require("./modules/history-rewriter");
 const memory_1 = require("./modules/memory");
@@ -223,6 +226,44 @@ check('cache.semantic-hit', () => {
     const probe = text.replace(' test ', ' tests ');
     const hit = cache.findSimilar(probe);
     assert(hit !== undefined && hit.score >= 0.85, `semantic hit score=${hit?.score}`);
+});
+check('scope.budget-partition', () => {
+    const budget = (0, scope_1.planBudget)(20000, 2200);
+    assert(budget.toolsBudget <= 2200, `tools budget must respect schema: ${budget.toolsBudget}`);
+    assert(budget.memoryBudget > 0 && budget.liveBudget > 0, 'budget partitions missing');
+    assert(budget.retainRecent >= 2 && budget.retainRecent <= 12, `retainRecent=${budget.retainRecent}`);
+    assert(budget.toolChars >= 200, `toolChars=${budget.toolChars}`);
+});
+check('osiris.stable-seal', () => {
+    const messages = [{ role: 'user', content: 'fix the auth test' }];
+    const tools = [{ name: 'read' }, { name: 'bash' }];
+    const first = (0, osiris_1.sealState)({ messages, tools, bucket: (0, osiris_1.intentBucket)('fix the auth test'), keepRecent: 4 });
+    const second = (0, osiris_1.sealState)({ messages, tools, bucket: (0, osiris_1.intentBucket)('fix the auth test'), keepRecent: 4 });
+    assert(first.toolsHash === second.toolsHash && first.historyHash === second.historyHash, 'seal must be deterministic');
+    const drifted = (0, osiris_1.sealState)({ messages, tools: [...tools, { name: 'write' }], bucket: first.bucket, keepRecent: 4 });
+    assert(drifted.toolsHash !== first.toolsHash, 'tool drift must change toolsHash');
+});
+check('scout.bm25-selection', () => {
+    const tools = Array.from({ length: 60 }, (_, index) => ({
+        name: index % 3 === 0 ? `read_file_${index}` : `util_${index}`,
+        description: index % 3 === 0 ? 'read a file from disk' : `utility number ${index}`,
+    }));
+    const selection = (0, tool_attention_1.selectToolsScout)(tools, 'read the config file', 5);
+    assert(selection.selected.length <= 6, `selected=${selection.selected.length}`);
+    assert(selection.selected.some((tool) => tool.name === 'search_tools'), 'search_tools missing');
+    assert(selection.selected.some((tool) => tool.name.startsWith('read_file_')), 'BM25 failed to surface read tool');
+});
+check('toolpipe.publish-resolve', () => {
+    const dir = node_path_1.default.join('.self-test-pipe');
+    node_fs_1.default.mkdirSync(dir, { recursive: true });
+    const file = node_path_1.default.join(dir, 'payload.txt');
+    node_fs_1.default.writeFileSync(file, 'hello pipe', 'utf8');
+    const pipe = new tool_pipe_1.ToolPipe(dir);
+    const published = pipe.publishFile(file);
+    assert(published.ref.startsWith('pipe-'), `ref=${published.ref}`);
+    const resolved = pipe.resolve(published.ref);
+    assert(resolved.ok && resolved.text === 'hello pipe', 'pipe resolve mismatch');
+    node_fs_1.default.rmSync(dir, { recursive: true, force: true });
 });
 check('memory.savings-accounting', () => {
     const entries = [];

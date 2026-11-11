@@ -17,6 +17,7 @@
 import type { RewriteResult } from './history-rewriter';
 import { type ResponseCache } from './response-cache';
 import { type ToolLike } from './tool-attention';
+import { type ScopeBudget } from './scope';
 export interface SchemaStats {
     changed: number;
     charsBefore: number;
@@ -69,7 +70,7 @@ export interface SchemaCompressorOptions {
         rewriteAfterTokens?: number;
     }) => void;
     /** 请求级历史重写（v1.2）：只改 messages 内容，不删除/重排消息。 */
-    rewriteHistory?: (messages: any) => RewriteResult | null;
+    rewriteHistory?: (messages: any, budget?: ScopeBudget) => RewriteResult | null;
     /** 精确哈希响应缓存（v1.2）：命中时直接重放 chunk。 */
     responseCache?: ResponseCache;
     onCacheHit?: () => void;

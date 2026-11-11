@@ -19,7 +19,9 @@ import { estimateTokens } from '../contracts'
 import { logEvent } from '../log'
 import type { RewriteResult } from './history-rewriter'
 import { replayChunks, type ResponseCache } from './response-cache'
-import { selectTools, withCatalog, type ToolLike } from './tool-attention'
+import { selectTools, selectToolsScout, selectionFromNames, withCatalog, type ToolLike, type ToolSelection } from './tool-attention'
+import { planBudget, type ScopeBudget } from './scope'
+import { sealState, intentBucket } from './osiris'
 
 export interface SchemaStats {
   changed: number
@@ -167,7 +169,7 @@ export interface SchemaCompressorOptions {
     rewriteAfterTokens?: number
   }) => void
   /** 请求级历史重写（v1.2）：只改 messages 内容，不删除/重排消息。 */
-  rewriteHistory?: (messages: any) => RewriteResult | null
+  rewriteHistory?: (messages: any, budget?: ScopeBudget) => RewriteResult | null
   /** 精确哈希响应缓存（v1.2）：命中时直接重放 chunk。 */
   responseCache?: ResponseCache
   onCacheHit?: () => void
@@ -220,31 +222,63 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   }
 
   let lastLogKey = ''
-  const lastToolSignature = new Map<string, string>()
+  let lastBudgetKey = ''
+  const anchors = new Map<string, { bucket: string; names: string[] }>()
+  const lastSeals = new Map<string, string>()
 
   const transform = (request: any): any => {
     try {
       if (!request) return request
-      const rewrite = options.rewriteHistory?.(request.messages) ?? null
+      const sessionKey = String(request.sessionId ?? 'unknown')
+      const rawMessagesTokens = estimateMessagesTokens(request.messages)
+      const toolsTokensBefore = Math.ceil(JSON.stringify(request.tools ?? []).length / 4)
+      const totalTokens = rawMessagesTokens + toolsTokensBefore
+      const budget = planBudget(totalTokens, toolsTokensBefore)
+      const budgetKey = `${sessionKey}:${Math.floor(totalTokens / 2000)}`
+      if (budgetKey !== lastBudgetKey) {
+        lastBudgetKey = budgetKey
+        logEvent('info', 'scope.budget', { module: 'SCOPE', sessionId: sessionKey, ...budget })
+      }
+
+      const rewrite = options.rewriteHistory?.(request.messages, budget) ?? null
       let messages = rewrite?.messages ?? request.messages
+      const rewriteSaved = rewrite?.saved ?? 0
+      const rewriteBeforeTokens = rewrite?.beforeTokens ?? rawMessagesTokens
+      const bucketPrompt = lastUserText(messages) ?? ''
+      const bucket = intentBucket(bucketPrompt)
       let attendedTools: any[] | null = null
+      let selection: ToolSelection | null = null
+
       if (options.toolAttention?.enabled && Array.isArray(request.tools) && request.tools.length > 1) {
-        const selection = selectTools(request.tools as ToolLike[], lastUserText(messages) ?? '', options.toolAttention.topK ?? 5)
+        const previous = anchors.get(sessionKey)
+        if (previous && previous.bucket === bucket) {
+          selection = selectionFromNames(request.tools as ToolLike[], previous.names)
+          if (selection) {
+            logEvent('info', 'osiris.anchor', {
+              module: 'OSIRIS',
+              sessionId: sessionKey,
+              bucket: previous.bucket,
+              tools: previous.names.length,
+              reused: true,
+            })
+          }
+        }
+        if (!selection) {
+          selection = selectToolsScout(request.tools as ToolLike[], bucketPrompt, options.toolAttention.topK ?? 5)
+          anchors.set(sessionKey, { bucket, names: selection.selected.map((tool) => tool.name) })
+          logEvent('info', 'scout.route', {
+            module: 'SCOUT',
+            sessionId: sessionKey,
+            bucket,
+            total: request.tools.length,
+            selected: selection.selected.length,
+            top: selection.scoreboard.slice(0, 5),
+          })
+        }
         if (selection.hidden.length > 0) {
           messages = withCatalog(messages, selection.catalog)
           options.onToolCatalog?.(request.tools as ToolLike[])
           attendedTools = selection.selected
-          const sessionKey = String(request.sessionId ?? 'unknown')
-          const signature = selection.selected.map((tool) => tool.name).join(',')
-          const previous = lastToolSignature.get(sessionKey)
-          if (previous !== undefined && previous !== signature) {
-            logEvent('warn', 'tool_attention.prefix_risk', {
-              module: 'ToolAttention',
-              sessionId: sessionKey,
-              reason: 'tool set changed across requests; prefix cache may miss',
-            })
-          }
-          lastToolSignature.set(sessionKey, signature)
           logEvent('info', 'tool_attention.filtered', {
             module: 'ToolAttention',
             total: request.tools.length,
@@ -254,9 +288,26 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
           })
         }
       }
+
+      const seal = sealState({
+        messages,
+        tools: attendedTools ?? request.tools ?? [],
+        bucket,
+        keepRecent: budget.retainRecent,
+      })
+      const sealKey = `${seal.systemHash}|${seal.toolsHash}|${seal.historyHash}`
+      const previousSeal = lastSeals.get(sessionKey)
+      if (sealKey !== previousSeal) {
+        lastSeals.set(sessionKey, sealKey)
+        logEvent('info', 'osiris.seal', {
+          module: 'OSIRIS',
+          sessionId: sessionKey,
+          ...seal,
+          changed: previousSeal !== undefined,
+        })
+      }
+
       const messagesTokens = estimateMessagesTokens(messages)
-      const rewriteSaved = rewrite?.saved ?? 0
-      const rewriteBeforeTokens = rewrite?.beforeTokens ?? messagesTokens
       if (!Array.isArray(request.tools) || request.tools.length === 0) {
         options.onRequest?.({
           sessionId: String(request.sessionId ?? ''),

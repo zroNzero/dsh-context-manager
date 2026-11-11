@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.0.0 — Production Release — 2026-11-11
+
+### 全量武器审计后的四项重型系统
+
+- **SCOPE 分层预算**：按总上下文切分 Tools/Memory/Live 预算，自适应
+  `retainRecent` 与旧工具字符上限；日志 `scope.budget`。
+- **OSIRIS 状态密封**：system/tools/history 三套哈希 + 意图桶（bucket）；
+  同一 bucket 复用工具集，解决 Tool Attention 每轮换工具导致的前缀击穿；
+  日志 `osiris.seal` / `osiris.anchor`。
+- **SCOUT 语义工具路由**：BM25（IDF 加权）替代朴素命中，top-5 完整 schema +
+  目录 + `search_tools`；日志 `scout.route`。
+- **ToolPipe 数据平面**：工具输出落盘后只传 `[PIPE] ref=pipe-xxxxxxxx`，
+  新增 `read_ref` 元工具按需取回；索引持久化到 `.pipe-index.json`；
+  日志 `toolpipe.publish` / `toolpipe.read`。
+- 测试：`self-test 17/17`、`verify 18/18`；demo 同时输出四类日志。
+
 ## v1.3.0 — 2026-11-11
 
 ### 四件重型武器

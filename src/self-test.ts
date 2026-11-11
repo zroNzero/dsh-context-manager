@@ -9,8 +9,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { runCacheAnchorSelfTest } from './cacheAnchor'
 import { runExtraction, buildFirewallSummary, toonEncode } from './modules/extraction'
-import { selectTools } from './modules/tool-attention'
+import { selectTools, selectToolsScout } from './modules/tool-attention'
 import { ResponseCache } from './modules/response-cache'
+import { planBudget } from './modules/scope'
+import { sealState, intentBucket } from './modules/osiris'
+import { ToolPipe } from './modules/tool-pipe'
 import { estimateTokens } from './contracts'
 import { rewriteMessages } from './modules/history-rewriter'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
@@ -259,6 +262,48 @@ check('cache.semantic-hit', () => {
   const probe = text.replace(' test ', ' tests ')
   const hit = cache.findSimilar(probe)
   assert(hit !== undefined && hit.score >= 0.85, `semantic hit score=${hit?.score}`)
+})
+
+check('scope.budget-partition', () => {
+  const budget = planBudget(20000, 2200)
+  assert(budget.toolsBudget <= 2200, `tools budget must respect schema: ${budget.toolsBudget}`)
+  assert(budget.memoryBudget > 0 && budget.liveBudget > 0, 'budget partitions missing')
+  assert(budget.retainRecent >= 2 && budget.retainRecent <= 12, `retainRecent=${budget.retainRecent}`)
+  assert(budget.toolChars >= 200, `toolChars=${budget.toolChars}`)
+})
+
+check('osiris.stable-seal', () => {
+  const messages = [{ role: 'user', content: 'fix the auth test' }]
+  const tools = [{ name: 'read' }, { name: 'bash' }]
+  const first = sealState({ messages, tools, bucket: intentBucket('fix the auth test'), keepRecent: 4 })
+  const second = sealState({ messages, tools, bucket: intentBucket('fix the auth test'), keepRecent: 4 })
+  assert(first.toolsHash === second.toolsHash && first.historyHash === second.historyHash, 'seal must be deterministic')
+  const drifted = sealState({ messages, tools: [...tools, { name: 'write' }], bucket: first.bucket, keepRecent: 4 })
+  assert(drifted.toolsHash !== first.toolsHash, 'tool drift must change toolsHash')
+})
+
+check('scout.bm25-selection', () => {
+  const tools = Array.from({ length: 60 }, (_, index) => ({
+    name: index % 3 === 0 ? `read_file_${index}` : `util_${index}`,
+    description: index % 3 === 0 ? 'read a file from disk' : `utility number ${index}`,
+  }))
+  const selection = selectToolsScout(tools, 'read the config file', 5)
+  assert(selection.selected.length <= 6, `selected=${selection.selected.length}`)
+  assert(selection.selected.some((tool) => tool.name === 'search_tools'), 'search_tools missing')
+  assert(selection.selected.some((tool) => tool.name.startsWith('read_file_')), 'BM25 failed to surface read tool')
+})
+
+check('toolpipe.publish-resolve', () => {
+  const dir = path.join('.self-test-pipe')
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'payload.txt')
+  fs.writeFileSync(file, 'hello pipe', 'utf8')
+  const pipe = new ToolPipe(dir)
+  const published = pipe.publishFile(file)
+  assert(published.ref.startsWith('pipe-'), `ref=${published.ref}`)
+  const resolved = pipe.resolve(published.ref)
+  assert(resolved.ok && resolved.text === 'hello pipe', 'pipe resolve mismatch')
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 check('memory.savings-accounting', () => {

@@ -65,6 +65,7 @@ const savings_ledger_1 = require("./modules/savings-ledger");
 const workspace_1 = require("./modules/workspace");
 const history_rewriter_1 = require("./modules/history-rewriter");
 const response_cache_1 = require("./modules/response-cache");
+const tool_pipe_1 = require("./modules/tool-pipe");
 exports.name = 'dsh-context-manager';
 exports.inject = ['systemPrompt', 'tools', 'sessions', 'agents'];
 exports.Config = zod_1.z.object({
@@ -317,6 +318,7 @@ function apply(ctx, rawConfig = {}) {
     const dedup = new dedup_bus_1.DedupBus(256);
     const ledger = new savings_ledger_1.SavingsLedger();
     const responseCache = new response_cache_1.ResponseCache({ ttlMs: config.responseCacheTtlMs, similarityThreshold: config.semanticCacheThreshold });
+    const toolPipe = new tool_pipe_1.ToolPipe(path.resolve(config.spillDir));
     const toolSchemas = new Map();
     let localAvailable = false;
     const probeLocal = async () => {
@@ -477,6 +479,36 @@ function apply(ctx, rawConfig = {}) {
     catch (error) {
         (0, log_1.logEvent)('warn', 'search_tools.register.failed', { error: String(error) });
     }
+    // v2.0：ToolPipe 数据平面——按 [PIPE] ref 取回落盘原文。
+    try {
+        const pipeDisposer = services.tools?.register?.({
+            name: 'read_ref',
+            description: 'Read the full content of a spilled tool result by its [PIPE] ref (e.g. pipe-1a2b3c4d5e6f).',
+            parameters: {
+                ref: { type: 'string', description: 'PIPE reference', required: true },
+            },
+            output: {
+                schema: {
+                    type: 'object',
+                    properties: { ok: { type: 'boolean' }, text: { type: 'string' } },
+                    required: ['ok', 'text'],
+                    additionalProperties: false,
+                },
+                render: (value) => [{ type: 'text', text: String(value?.text ?? '') }],
+            },
+            execute: async (exec) => {
+                const ref = String(exec?.parameters?.ref ?? exec?.ref ?? '');
+                const result = toolPipe.resolve(ref);
+                (0, log_1.logEvent)('info', 'toolpipe.read', { module: 'ToolPipe', ref, ok: result.ok, bytes: result.bytes });
+                return { ok: result.ok, text: result.text.slice(0, 20000) };
+            },
+        });
+        if (typeof pipeDisposer === 'function')
+            disposers.push(pipeDisposer);
+    }
+    catch (error) {
+        (0, log_1.logEvent)('warn', 'read_ref.register.failed', { error: String(error) });
+    }
     // Schema 压缩依赖 llm 服务。真实 DSH 里 llm 可能挂在 agent 作用域而非 profile 根，
     // 因此既在根 ctx 上重试，也在首条 pre-step 的 payload.agent.loopCtx.llm 上补装。
     const pendingTimers = [];
@@ -490,10 +522,10 @@ function apply(ctx, rawConfig = {}) {
             enabled: true,
             maxDescriptionChars: 120,
             rewriteHistory: config.rewriteEnabled
-                ? (messages) => (0, history_rewriter_1.rewriteMessages)(messages, {
-                    retainRecent: config.rewriteRetainRecent,
-                    assistantChars: config.rewriteAssistantChars,
-                    toolChars: config.rewriteToolChars,
+                ? (messages, budget) => (0, history_rewriter_1.rewriteMessages)(messages, {
+                    retainRecent: budget?.retainRecent ?? config.rewriteRetainRecent,
+                    assistantChars: budget?.assistantChars ?? config.rewriteAssistantChars,
+                    toolChars: budget?.toolChars ?? config.rewriteToolChars,
                 })
                 : undefined,
             responseCache: config.responseCacheEnabled ? responseCache : undefined,
@@ -671,11 +703,13 @@ function apply(ctx, rawConfig = {}) {
                     freedBytes: gc.freedBytes,
                 });
             }
-            const finalText = admitted.admitted
-                ? compressed === text
-                    ? admitted.text
-                    : `${compressed}\n\n${admitted.text}`
-                : compressed;
+            let pipeLine = '';
+            if (admitted.admitted && admitted.spilledTo) {
+                const published = toolPipe.publishFile(admitted.spilledTo);
+                pipeLine = `\n[PIPE] ref=${published.ref}`;
+                (0, log_1.logEvent)('info', 'toolpipe.publish', { module: 'ToolPipe', ref: published.ref, bytes: published.bytes });
+            }
+            const finalText = (admitted.admitted ? (compressed === text ? admitted.text : `${compressed}\n\n${admitted.text}`) : compressed) + pipeLine;
             const tokensAfter = (0, contracts_1.estimateTokens)(finalText);
             const saved = Math.max(0, tokensBefore - tokensAfter);
             counters.savedTokens += saved;

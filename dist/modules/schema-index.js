@@ -24,6 +24,8 @@ const contracts_1 = require("../contracts");
 const log_1 = require("../log");
 const response_cache_1 = require("./response-cache");
 const tool_attention_1 = require("./tool-attention");
+const scope_1 = require("./scope");
+const osiris_1 = require("./osiris");
 function truncateText(value, maxChars) {
     const points = Array.from(value);
     if (points.length <= maxChars)
@@ -176,31 +178,61 @@ function installSchemaCompressor(ctx, options = {}) {
         return () => { };
     }
     let lastLogKey = '';
-    const lastToolSignature = new Map();
+    let lastBudgetKey = '';
+    const anchors = new Map();
+    const lastSeals = new Map();
     const transform = (request) => {
         try {
             if (!request)
                 return request;
-            const rewrite = options.rewriteHistory?.(request.messages) ?? null;
+            const sessionKey = String(request.sessionId ?? 'unknown');
+            const rawMessagesTokens = estimateMessagesTokens(request.messages);
+            const toolsTokensBefore = Math.ceil(JSON.stringify(request.tools ?? []).length / 4);
+            const totalTokens = rawMessagesTokens + toolsTokensBefore;
+            const budget = (0, scope_1.planBudget)(totalTokens, toolsTokensBefore);
+            const budgetKey = `${sessionKey}:${Math.floor(totalTokens / 2000)}`;
+            if (budgetKey !== lastBudgetKey) {
+                lastBudgetKey = budgetKey;
+                (0, log_1.logEvent)('info', 'scope.budget', { module: 'SCOPE', sessionId: sessionKey, ...budget });
+            }
+            const rewrite = options.rewriteHistory?.(request.messages, budget) ?? null;
             let messages = rewrite?.messages ?? request.messages;
+            const rewriteSaved = rewrite?.saved ?? 0;
+            const rewriteBeforeTokens = rewrite?.beforeTokens ?? rawMessagesTokens;
+            const bucketPrompt = lastUserText(messages) ?? '';
+            const bucket = (0, osiris_1.intentBucket)(bucketPrompt);
             let attendedTools = null;
+            let selection = null;
             if (options.toolAttention?.enabled && Array.isArray(request.tools) && request.tools.length > 1) {
-                const selection = (0, tool_attention_1.selectTools)(request.tools, lastUserText(messages) ?? '', options.toolAttention.topK ?? 5);
+                const previous = anchors.get(sessionKey);
+                if (previous && previous.bucket === bucket) {
+                    selection = (0, tool_attention_1.selectionFromNames)(request.tools, previous.names);
+                    if (selection) {
+                        (0, log_1.logEvent)('info', 'osiris.anchor', {
+                            module: 'OSIRIS',
+                            sessionId: sessionKey,
+                            bucket: previous.bucket,
+                            tools: previous.names.length,
+                            reused: true,
+                        });
+                    }
+                }
+                if (!selection) {
+                    selection = (0, tool_attention_1.selectToolsScout)(request.tools, bucketPrompt, options.toolAttention.topK ?? 5);
+                    anchors.set(sessionKey, { bucket, names: selection.selected.map((tool) => tool.name) });
+                    (0, log_1.logEvent)('info', 'scout.route', {
+                        module: 'SCOUT',
+                        sessionId: sessionKey,
+                        bucket,
+                        total: request.tools.length,
+                        selected: selection.selected.length,
+                        top: selection.scoreboard.slice(0, 5),
+                    });
+                }
                 if (selection.hidden.length > 0) {
                     messages = (0, tool_attention_1.withCatalog)(messages, selection.catalog);
                     options.onToolCatalog?.(request.tools);
                     attendedTools = selection.selected;
-                    const sessionKey = String(request.sessionId ?? 'unknown');
-                    const signature = selection.selected.map((tool) => tool.name).join(',');
-                    const previous = lastToolSignature.get(sessionKey);
-                    if (previous !== undefined && previous !== signature) {
-                        (0, log_1.logEvent)('warn', 'tool_attention.prefix_risk', {
-                            module: 'ToolAttention',
-                            sessionId: sessionKey,
-                            reason: 'tool set changed across requests; prefix cache may miss',
-                        });
-                    }
-                    lastToolSignature.set(sessionKey, signature);
                     (0, log_1.logEvent)('info', 'tool_attention.filtered', {
                         module: 'ToolAttention',
                         total: request.tools.length,
@@ -210,9 +242,24 @@ function installSchemaCompressor(ctx, options = {}) {
                     });
                 }
             }
+            const seal = (0, osiris_1.sealState)({
+                messages,
+                tools: attendedTools ?? request.tools ?? [],
+                bucket,
+                keepRecent: budget.retainRecent,
+            });
+            const sealKey = `${seal.systemHash}|${seal.toolsHash}|${seal.historyHash}`;
+            const previousSeal = lastSeals.get(sessionKey);
+            if (sealKey !== previousSeal) {
+                lastSeals.set(sessionKey, sealKey);
+                (0, log_1.logEvent)('info', 'osiris.seal', {
+                    module: 'OSIRIS',
+                    sessionId: sessionKey,
+                    ...seal,
+                    changed: previousSeal !== undefined,
+                });
+            }
             const messagesTokens = estimateMessagesTokens(messages);
-            const rewriteSaved = rewrite?.saved ?? 0;
-            const rewriteBeforeTokens = rewrite?.beforeTokens ?? messagesTokens;
             if (!Array.isArray(request.tools) || request.tools.length === 0) {
                 options.onRequest?.({
                     sessionId: String(request.sessionId ?? ''),

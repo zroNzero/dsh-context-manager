@@ -22,6 +22,10 @@ import { CompressionBreaker } from './modules/breaker'
 import { selectTools } from './modules/tool-attention'
 import { toonEncode } from './modules/extraction'
 import { ResponseCache } from './modules/response-cache'
+import { planBudget } from './modules/scope'
+import { sealState, intentBucket } from './modules/osiris'
+import { selectToolsScout } from './modules/tool-attention'
+import { ToolPipe } from './modules/tool-pipe'
 
 const write = (line: string): void => {
   process.stdout.write(`${line}\n`)
@@ -321,6 +325,28 @@ async function main(): Promise<void> {
     tokensAfter: attentionAfter,
   })
 
+  const budget = planBudget(20000, attentionBefore)
+  logEvent('info', 'scope.budget', { module: 'SCOPE', ...budget })
+  const seal = sealState({
+    messages: [{ role: 'user', content: 'run the failing test and read the auth file' }],
+    tools: attentionTools,
+    bucket: intentBucket('run the failing test and read the auth file'),
+    keepRecent: budget.retainRecent,
+  })
+  logEvent('info', 'osiris.seal', { module: 'OSIRIS', ...seal })
+  const scout = selectToolsScout(attentionTools, 'run the failing test and read the auth file', 5)
+  logEvent('info', 'scout.route', { module: 'SCOUT', total: 80, selected: scout.selected.length, top: scout.scoreboard.slice(0, 5) })
+
+  const pipeDir = path.join('.demo-spill', 'pipe')
+  fs.mkdirSync(pipeDir, { recursive: true })
+  const pipeFile = path.join(pipeDir, 'demo-payload.txt')
+  fs.writeFileSync(pipeFile, 'pipe payload for demo', 'utf8')
+  const pipe = new ToolPipe(pipeDir)
+  const pipePublished = pipe.publishFile(pipeFile)
+  const pipeRead = pipe.resolve(pipePublished.ref)
+  logEvent('info', 'toolpipe.publish', { module: 'ToolPipe', ref: pipePublished.ref, bytes: pipePublished.bytes })
+  logEvent('info', 'toolpipe.read', { module: 'ToolPipe', ref: pipePublished.ref, ok: pipeRead.ok, bytes: pipeRead.bytes })
+
   const toonRows = Array.from({ length: 120 }, (_, index) => ({
     id: index,
     level: 'info',
@@ -385,6 +411,8 @@ async function main(): Promise<void> {
   )
   write(`[13] semantic cache: ${semanticHit ? `hit score=${semanticHit.score.toFixed(3)}` : 'miss'}`)
   write(`[14] routing probe: ${localProbeOk ? 'local available' : 'local unavailable'} | local_hit=${localRoute.result.route === 'local'}`)
+  write(`[15] scope: tools=${budget.toolsBudget} memory=${budget.memoryBudget} live=${budget.liveBudget} retain=${budget.retainRecent} | osiris toolsHash=${seal.toolsHash.slice(0, 8)}`)
+  write(`[16] toolpipe: ref=${pipePublished.ref} bytes=${pipePublished.bytes} read=${pipeRead.ok}`)
 
   logEvent('info', 'demo.summary', {
     pipelineSaved: pipelineBefore - pipelineAfter,
