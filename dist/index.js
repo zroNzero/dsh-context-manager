@@ -1029,11 +1029,13 @@ function apply(ctx, rawConfig = {}) {
                         break;
                     }
                 }
-                const tailText = String(last?.text ?? '');
                 effortContext = {
                     userText,
                     lastRole: String(last?.role ?? ''),
-                    toolErrored: last?.role === 'tool' ? (0, effort_policy_1.looksLikeError)(tailText) : false,
+                    // 只认宿主给出的错误标记。用文本猜（looksLikeError）会把「输出里恰好含 error/失败
+                    // 字样」的普通工具结果当成失败，于是每一步都升级回 max，effort 杠杆直接失效
+                    // （实盘 5/5 次决策都是 execute+error）。
+                    toolErrored: last?.role === 'tool' ? last?.isError === true : false,
                 };
             }
             const workspace = workspaceFor(live, payload?.agent);
