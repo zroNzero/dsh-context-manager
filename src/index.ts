@@ -113,7 +113,7 @@ export const Config = z.object({
   effortEasy: z.enum(['off', 'low', 'high', 'max']).default('low'),
   effortNormal: z.enum(['off', 'low', 'high', 'max']).default('high'),
   effortHard: z.enum(['off', 'low', 'high', 'max']).default('max'),
-  effortEscalateOnError: z.boolean().default(true),
+  effortEscalateOnError: z.boolean().default(false),
   /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
   /**
    * 动态工具集（Tool Attention 分层）默认关闭 —— 与 keepalive 直接冲突。

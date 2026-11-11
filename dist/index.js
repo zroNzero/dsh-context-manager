@@ -139,7 +139,7 @@ exports.Config = zod_1.z.object({
     effortEasy: zod_1.z.enum(['off', 'low', 'high', 'max']).default('low'),
     effortNormal: zod_1.z.enum(['off', 'low', 'high', 'max']).default('high'),
     effortHard: zod_1.z.enum(['off', 'low', 'high', 'max']).default('max'),
-    effortEscalateOnError: zod_1.z.boolean().default(true),
+    effortEscalateOnError: zod_1.z.boolean().default(false),
     /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
     /**
      * 动态工具集（Tool Attention 分层）默认关闭 —— 与 keepalive 直接冲突。
