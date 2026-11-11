@@ -192,6 +192,23 @@ export interface SchemaCompressorOptions {
   outputGuard?: { enabled?: boolean; maxTokens: number }
   onOutputTruncated?: (reason: 'max_tokens' | 'json_closed' | 'code_closed') => void
   /**
+   * TTL Keepalive（武器 30）：在 provider 缓存过期前，用逐字节相同的载荷重放一次
+   * （maxTokens=1）把缓存续上。默认关闭，由 apply() 按配置显式打开。
+   */
+  keepalive?: {
+    enabled?: boolean
+    /** provider 缓存 TTL，默认 240_000ms。 */
+    ttlMs?: number
+    /** 一次空闲期最多续几次，默认 4。 */
+    refreshes?: number
+    /** 低于这个 prompt 规模不值得续，默认 8000 token。 */
+    minPromptTokens?: number
+    /** 在 TTL 的这个比例处触发，默认 0.5。 */
+    marginRatio?: number
+    /** 触发延迟下限，默认 5000ms（测试用）。 */
+    minDelayMs?: number
+  }
+  /**
    * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
    * 并同时给出同一请求压缩前/后的载荷字符数，供 BillingLedger 实测校准。
    */
@@ -399,6 +416,11 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
 
       const toolsBeforeChars = JSON.stringify(request.tools).length
 
+      // 工具目录始终回填，保证 search_tools 在任何模式下都可查（懒加载关闭时尤其重要）。
+      if (Array.isArray(request.tools) && request.tools.length > 0) {
+        options.onToolCatalog?.(request.tools as ToolLike[])
+      }
+
       let tools = (attendedTools ?? request.tools) as ToolSchemaLike[]
       let hidden: string[] = []
       if (selectionEnabled) {
@@ -449,8 +471,109 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   const originalStream = llm.stream
   const originalPrepare = llm.prepareCall
 
-  const observeUsage = (chunk: any, optimized: any, beforeChars: number, afterChars: number): void => {
-    if (!options.onUsage || chunk?.type !== 'usage' || !chunk.usage) return
+  // -------------------------------------------------------------------------
+  // TTL Keepalive（武器 30）
+  //
+  // provider 的 prompt 缓存约 4 分钟过期。用户读完回答再回来，通常已经超过这个窗口，
+  // 于是下一轮第一个请求必然整段 miss（¥1/M），而它本来可以按 hit（¥0.02/M）计费。
+  //
+  // 做法：在缓存过期之前，用**完全相同**的 system/tools/messages 再发一次（maxTokens=1），
+  // 把缓存条目续上。代价是那次重放按 hit 价计费（约 miss 的 1/50），收益是下一轮的首请求
+  // 不再全价。策略上限：最多续 `refreshes` 次，实时请求一发出就取消（缓存已被真正刷新）。
+  //
+  // 红线：
+  // - 绝不继承原请求的 AbortSignal（回合结束后 signal 已 abort，会让保活立刻失败）；
+  // - 绝不改写内容（prefix 必须逐字节一致，否则续的是另一个缓存条目，纯烧钱）；
+  // - 保活失败/超时对主链路零影响。
+  // -------------------------------------------------------------------------
+  const keepaliveCfg = options.keepalive
+  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null
+  let keepaliveRemaining = 0
+  let disposed = false
+
+  const cancelKeepalive = (): void => {
+    if (keepaliveTimer !== null) {
+      clearTimeout(keepaliveTimer)
+      keepaliveTimer = null
+    }
+  }
+
+  const armKeepalive = (invoke: (request: any) => any, optimized: any, promptTokens: number): void => {
+    if (disposed || !keepaliveCfg?.enabled) return
+    if (promptTokens < (keepaliveCfg.minPromptTokens ?? 8000)) {
+      keepaliveRemaining = 0
+      cancelKeepalive()
+      return
+    }
+    if (keepaliveRemaining <= 0) return
+    const ttl = keepaliveCfg.ttlMs ?? 240_000
+    const delay = Math.max(keepaliveCfg.minDelayMs ?? 5_000, Math.floor(ttl * (keepaliveCfg.marginRatio ?? 0.5)))
+    cancelKeepalive()
+    keepaliveTimer = setTimeout(() => {
+      keepaliveTimer = null
+      void runKeepalive(invoke, optimized, promptTokens)
+    }, delay)
+    const timer = keepaliveTimer as unknown as { unref?: () => void }
+    if (typeof timer.unref === 'function') timer.unref()
+  }
+
+  const runKeepalive = async (invoke: (request: any) => any, optimized: any, basePromptTokens: number): Promise<void> => {
+    if (disposed || keepaliveRemaining <= 0) return
+    keepaliveRemaining -= 1
+    let promptTokens = basePromptTokens
+    try {
+      const body: any = { ...optimized, maxTokens: 1, purpose: 'cache-keepalive' }
+      delete body.signal
+      const stream = invoke(body)
+      if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return
+      let cached = 0
+      let fresh = 0
+      for await (const chunk of stream) {
+        if (chunk?.type !== 'usage' || !chunk.usage) continue
+        cached = Math.max(0, chunk.usage.cacheReadTokens ?? 0)
+        fresh = Math.max(0, chunk.usage.inputTokens ?? 0)
+        promptTokens = cached + fresh
+        // 保活本身就是真实支出，必须进账本（压缩前后字符相同 -> 零削减，只计成本）。
+        if (options.onUsage) {
+          try {
+            options.onUsage({
+              purpose: 'cache-keepalive',
+              model: String(optimized?.model ?? ''),
+              usage: chunk.usage,
+              beforeChars: 0,
+              afterChars: 0,
+            })
+          } catch {
+            /* 记账失败不影响保活 */
+          }
+        }
+      }
+      logEvent('info', 'cache.keepalive_refresh', {
+        module: 'Keepalive',
+        sessionId: optimized?.sessionId ?? 'unknown',
+        promptTokens,
+        cachedTokens: cached,
+        freshTokens: fresh,
+        remaining: keepaliveRemaining,
+      })
+    } catch (error) {
+      logEvent('warn', 'cache.keepalive_failed', { module: 'Keepalive', error: String(error) })
+      return
+    }
+    if (keepaliveRemaining > 0) armKeepalive(invoke, optimized, promptTokens)
+  }
+
+  const observeUsage = (chunk: any, optimized: any, beforeChars: number, afterChars: number, invoke: (request: any) => any): void => {
+    if (chunk?.type !== 'usage' || !chunk.usage) return
+    const isKeepalive = optimized?.purpose === 'cache-keepalive'
+    if (!isKeepalive) {
+      // 真实请求发出去了：缓存由它自己刷新，取消挂起的保活并重置额度。
+      cancelKeepalive()
+      keepaliveRemaining = Math.max(0, Math.trunc(keepaliveCfg?.refreshes ?? 4))
+      const promptTokens = (chunk.usage.inputTokens ?? 0) + (chunk.usage.cacheReadTokens ?? 0)
+      armKeepalive(invoke, optimized, promptTokens)
+    }
+    if (!options.onUsage) return
     try {
       options.onUsage({
         purpose: String(optimized?.purpose ?? 'agent-loop'),
@@ -470,7 +593,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     if (!source || typeof source[Symbol.asyncIterator] !== 'function') return source
     return (async function* () {
       for await (const chunk of source) {
-        observeUsage(chunk, optimized, beforeChars, afterChars)
+        observeUsage(chunk, optimized, beforeChars, afterChars, invoke)
         yield chunk
       }
     })()
@@ -512,7 +635,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     return (async function* () {
       const chunks: any[] = []
       for await (const chunk of stream) {
-        observeUsage(chunk, optimized, beforeChars, afterChars)
+        observeUsage(chunk, optimized, beforeChars, afterChars, invoke)
         chunks.push(chunk)
         yield chunk
       }
@@ -542,6 +665,8 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   }
 
   return () => {
+    disposed = true
+    cancelKeepalive()
     try {
       llm.stream = originalStream
       if (typeof originalPrepare === 'function') llm.prepareCall = originalPrepare

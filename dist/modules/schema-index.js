@@ -328,6 +328,10 @@ function installSchemaCompressor(ctx, options = {}) {
                 return rewrite ? { ...request, messages } : request;
             }
             const toolsBeforeChars = JSON.stringify(request.tools).length;
+            // 工具目录始终回填，保证 search_tools 在任何模式下都可查（懒加载关闭时尤其重要）。
+            if (Array.isArray(request.tools) && request.tools.length > 0) {
+                options.onToolCatalog?.(request.tools);
+            }
             let tools = (attendedTools ?? request.tools);
             let hidden = [];
             if (selectionEnabled) {
@@ -375,8 +379,115 @@ function installSchemaCompressor(ctx, options = {}) {
     };
     const originalStream = llm.stream;
     const originalPrepare = llm.prepareCall;
-    const observeUsage = (chunk, optimized, beforeChars, afterChars) => {
-        if (!options.onUsage || chunk?.type !== 'usage' || !chunk.usage)
+    // -------------------------------------------------------------------------
+    // TTL Keepalive（武器 30）
+    //
+    // provider 的 prompt 缓存约 4 分钟过期。用户读完回答再回来，通常已经超过这个窗口，
+    // 于是下一轮第一个请求必然整段 miss（¥1/M），而它本来可以按 hit（¥0.02/M）计费。
+    //
+    // 做法：在缓存过期之前，用**完全相同**的 system/tools/messages 再发一次（maxTokens=1），
+    // 把缓存条目续上。代价是那次重放按 hit 价计费（约 miss 的 1/50），收益是下一轮的首请求
+    // 不再全价。策略上限：最多续 `refreshes` 次，实时请求一发出就取消（缓存已被真正刷新）。
+    //
+    // 红线：
+    // - 绝不继承原请求的 AbortSignal（回合结束后 signal 已 abort，会让保活立刻失败）；
+    // - 绝不改写内容（prefix 必须逐字节一致，否则续的是另一个缓存条目，纯烧钱）；
+    // - 保活失败/超时对主链路零影响。
+    // -------------------------------------------------------------------------
+    const keepaliveCfg = options.keepalive;
+    let keepaliveTimer = null;
+    let keepaliveRemaining = 0;
+    let disposed = false;
+    const cancelKeepalive = () => {
+        if (keepaliveTimer !== null) {
+            clearTimeout(keepaliveTimer);
+            keepaliveTimer = null;
+        }
+    };
+    const armKeepalive = (invoke, optimized, promptTokens) => {
+        if (disposed || !keepaliveCfg?.enabled)
+            return;
+        if (promptTokens < (keepaliveCfg.minPromptTokens ?? 8000)) {
+            keepaliveRemaining = 0;
+            cancelKeepalive();
+            return;
+        }
+        if (keepaliveRemaining <= 0)
+            return;
+        const ttl = keepaliveCfg.ttlMs ?? 240_000;
+        const delay = Math.max(keepaliveCfg.minDelayMs ?? 5_000, Math.floor(ttl * (keepaliveCfg.marginRatio ?? 0.5)));
+        cancelKeepalive();
+        keepaliveTimer = setTimeout(() => {
+            keepaliveTimer = null;
+            void runKeepalive(invoke, optimized, promptTokens);
+        }, delay);
+        const timer = keepaliveTimer;
+        if (typeof timer.unref === 'function')
+            timer.unref();
+    };
+    const runKeepalive = async (invoke, optimized, basePromptTokens) => {
+        if (disposed || keepaliveRemaining <= 0)
+            return;
+        keepaliveRemaining -= 1;
+        let promptTokens = basePromptTokens;
+        try {
+            const body = { ...optimized, maxTokens: 1, purpose: 'cache-keepalive' };
+            delete body.signal;
+            const stream = invoke(body);
+            if (!stream || typeof stream[Symbol.asyncIterator] !== 'function')
+                return;
+            let cached = 0;
+            let fresh = 0;
+            for await (const chunk of stream) {
+                if (chunk?.type !== 'usage' || !chunk.usage)
+                    continue;
+                cached = Math.max(0, chunk.usage.cacheReadTokens ?? 0);
+                fresh = Math.max(0, chunk.usage.inputTokens ?? 0);
+                promptTokens = cached + fresh;
+                // 保活本身就是真实支出，必须进账本（压缩前后字符相同 -> 零削减，只计成本）。
+                if (options.onUsage) {
+                    try {
+                        options.onUsage({
+                            purpose: 'cache-keepalive',
+                            model: String(optimized?.model ?? ''),
+                            usage: chunk.usage,
+                            beforeChars: 0,
+                            afterChars: 0,
+                        });
+                    }
+                    catch {
+                        /* 记账失败不影响保活 */
+                    }
+                }
+            }
+            (0, log_1.logEvent)('info', 'cache.keepalive_refresh', {
+                module: 'Keepalive',
+                sessionId: optimized?.sessionId ?? 'unknown',
+                promptTokens,
+                cachedTokens: cached,
+                freshTokens: fresh,
+                remaining: keepaliveRemaining,
+            });
+        }
+        catch (error) {
+            (0, log_1.logEvent)('warn', 'cache.keepalive_failed', { module: 'Keepalive', error: String(error) });
+            return;
+        }
+        if (keepaliveRemaining > 0)
+            armKeepalive(invoke, optimized, promptTokens);
+    };
+    const observeUsage = (chunk, optimized, beforeChars, afterChars, invoke) => {
+        if (chunk?.type !== 'usage' || !chunk.usage)
+            return;
+        const isKeepalive = optimized?.purpose === 'cache-keepalive';
+        if (!isKeepalive) {
+            // 真实请求发出去了：缓存由它自己刷新，取消挂起的保活并重置额度。
+            cancelKeepalive();
+            keepaliveRemaining = Math.max(0, Math.trunc(keepaliveCfg?.refreshes ?? 4));
+            const promptTokens = (chunk.usage.inputTokens ?? 0) + (chunk.usage.cacheReadTokens ?? 0);
+            armKeepalive(invoke, optimized, promptTokens);
+        }
+        if (!options.onUsage)
             return;
         try {
             options.onUsage({
@@ -398,7 +509,7 @@ function installSchemaCompressor(ctx, options = {}) {
             return source;
         return (async function* () {
             for await (const chunk of source) {
-                observeUsage(chunk, optimized, beforeChars, afterChars);
+                observeUsage(chunk, optimized, beforeChars, afterChars, invoke);
                 yield chunk;
             }
         })();
@@ -441,7 +552,7 @@ function installSchemaCompressor(ctx, options = {}) {
         return (async function* () {
             const chunks = [];
             for await (const chunk of stream) {
-                observeUsage(chunk, optimized, beforeChars, afterChars);
+                observeUsage(chunk, optimized, beforeChars, afterChars, invoke);
                 chunks.push(chunk);
                 yield chunk;
             }
@@ -471,6 +582,8 @@ function installSchemaCompressor(ctx, options = {}) {
         return () => { };
     }
     return () => {
+        disposed = true;
+        cancelKeepalive();
         try {
             llm.stream = originalStream;
             if (typeof originalPrepare === 'function')

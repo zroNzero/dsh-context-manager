@@ -114,12 +114,17 @@ dsh install D:\path\to\dsh-context-manager
         extractionTokens: 500
         firewallTokens: 250
         assumedTurns: 40
-        rewriteEnabled: true
+        rewriteEnabled: false          # 有损；会让已发前缀失效（见 docs/REAL-BILL-ANALYSIS.md）
         rewriteRetainRecent: 8
-        responseCacheEnabled: true
-        toolAttentionEnabled: true
+        responseCacheEnabled: true     # 精确请求缓存（逐字节相同才重放）
+        toolAttentionEnabled: false    # 动态工具集会作废整段 provider 缓存
         toolAttentionTopK: 5
+        semanticCacheEnabled: false    # 语义复用会让「同一句话的第二轮」重放旧回答
         semanticCacheThreshold: 0.85
+        keepaliveEnabled: true         # 缓存过期前重放前缀续命（TTL 默认 240s，最多 4 次）
+        keepaliveTtlMs: 240000
+        keepaliveRefreshes: 4
+        keepaliveMinPromptTokens: 8000
         localBaseUrl: http://127.0.0.1:11434
         compressionBudgetMs: 50
         localRouting: false

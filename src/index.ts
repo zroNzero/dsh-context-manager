@@ -88,8 +88,23 @@ export const Config = z.object({
   semanticCacheThreshold: z.number().min(0.5).max(1).default(0.85),
   /** 相似度语义复用（默认关）：会让「同一句话的第二轮」直接重放上一轮回答。 */
   semanticCacheEnabled: z.boolean().default(false),
+  /** TTL Keepalive（武器 30）：在 provider 缓存过期前重放前缀续命，避免跨轮首请求全价。 */
+  keepaliveEnabled: z.boolean().default(true),
+  keepaliveTtlMs: z.number().int().positive().default(240_000),
+  keepaliveRefreshes: z.number().int().min(0).max(24).default(4),
+  keepaliveMinPromptTokens: z.number().int().positive().default(8_000),
   /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
-  toolAttentionEnabled: z.boolean().default(true),
+  /**
+   * 动态工具集（Tool Attention 分层）默认关闭 —— 与 keepalive 直接冲突。
+   *
+   * 命中价 ¥0.02/M、未命中 ¥1/M（差 50 倍）。分层每轮按「最后一条用户消息」的意图桶
+   * 重选 top-k，用户一说新话，工具表就变 -> 位于 prompt 最前面的 tools 一变，
+   * **整段缓存作废**，这一轮按 miss 价重算全部 prompt。
+   * 而它省下的只是工具 schema 的 token，而且是按 hit 价算的，量级差 50 倍。
+   * 另外「只给一部分工具 + 让模型先 search_tools」本身也有选错工具的风险。
+   * 需要它的用户可显式打开；schema 描述瘦身仍然生效，且是稳定的（同样的输入永远同样的输出）。
+   */
+  toolAttentionEnabled: z.boolean().default(false),
   toolAttentionTopK: z.number().int().positive().default(5),
   /** 本地 LLM 端点（v1.3 快速探测）。 */
   localBaseUrl: z.string().default('http://127.0.0.1:11434'),
@@ -562,6 +577,12 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       onCacheHit: () => logEvent('info', 'cache.response_hit', responseCache.stats()),
       onSemanticHit: (score: number) => logEvent('info', 'cache.semantic_hit', { score, ...responseCache.stats() }),
       outputGuard: { enabled: config.outputGuardEnabled, maxTokens: config.outputMaxTokens },
+      keepalive: {
+        enabled: config.keepaliveEnabled,
+        ttlMs: config.keepaliveTtlMs,
+        refreshes: config.keepaliveRefreshes,
+        minPromptTokens: config.keepaliveMinPromptTokens,
+      },
       onOutputTruncated: (reason: string) =>
         logEvent('info', 'output.truncated', { module: 'OutputGuard', reason, maxTokens: config.outputMaxTokens }),
       toolAttention: { enabled: config.toolAttentionEnabled, topK: config.toolAttentionTopK },

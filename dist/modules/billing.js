@@ -88,20 +88,21 @@ class BillingLedger {
             savedHitTokens,
             unverifiedOutputTokens: unverified,
         };
+        // 口径修正（2026-11-11）：没有任何削减的请求也**必须**计入真实账单。
+        // 把它们排除掉，分母就只剩「被压缩过的那部分请求」，降幅会被系统性放大——
+        // 这正是「把估算写成实测」的另一种形态。包括 keepalive 这类纯支出请求。
+        this.records.push(record);
         if (removedPromptTokens === 0)
             this.noReduction += 1;
-        else {
-            this.records.push(record);
-            this.unverifiedOutput += unverified;
-            const bump = (map, key) => {
-                const bucket = map.get(key) ?? emptyBucket();
-                addTo(bucket, record);
-                map.set(key, bucket);
-            };
-            bump(this.byPurpose, record.purpose);
-            bump(this.byModel, record.model);
-            bump(this.byWindow, record.window);
-        }
+        this.unverifiedOutput += unverified;
+        const bump = (map, key) => {
+            const bucket = map.get(key) ?? emptyBucket();
+            addTo(bucket, record);
+            map.set(key, bucket);
+        };
+        bump(this.byPurpose, record.purpose);
+        bump(this.byModel, record.model);
+        bump(this.byWindow, record.window);
         return record;
     }
     /** 全部记录（含零削减请求），用于调试与断言。 */

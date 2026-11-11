@@ -95,38 +95,60 @@ prompt 侧成本几乎全部来自 **miss（未命中缓存）**：
 
 ---
 
-## 5. 据此做出的改动（2026-11-11）
+## 6. 缓存损坏的账：轮内 vs 跨轮（2026-11-11 追加实测）
+
+把全部真实请求按「是否回合首个请求」切开，就能看出两种性质完全不同的损失：
+
+| 类别 | 请求数 | prompt token | 命中率 | 花费 |
+|---|---:|---:|---:|---:|
+| 回合首个请求 | 178 | 6,181,815 | 4.5% | ¥9.9153 |
+| 轮内请求 | 5,511 | 14,849,260 | 42.0% | ¥30.1195 |
+
+- **轮内 miss 占全部 miss 的 59.3%**（¥8.43，账单的 21.1%）。轮内上下文只追加，
+  本来应该几乎全程命中——这部分是**前缀被打断**造成的纯损失，可以被「前缀修复」拿回来。
+- **跨轮 miss 占 40.7%**（¥5.79，账单的 14.5%）。这是用户读回答期间缓存过期，
+  只能靠 **TTL Keepalive** 拿回来，且只在用户于保活窗口内回来时有效。
+
+两项合计上限约 **35.6%**（低于 44.2% 的理论 prompt 上限，因为命中本身也要钱），
+这就是「不降智」前提下可辩护的收益空间。
+
+## 7. 据此做出的改动（2026-11-11）
 
 定位到的根因：**历史重写的压缩上限是按「当前实时 token 数」算出来的**。
 上下文每长一点，同一条旧消息就被截成另一个长度，于是已经发出去的前缀每次请求都变，
 provider 只能从头 miss 重算。实测轮内命中率 24.2%（轮内上下文只追加，本应接近 100%）。
 
-改了三处：
+改了三处，并按第 6 节的实测追加两处：
 
 | 改动 | 理由 |
 |---|---|
 | `rewriteEnabled` 默认 **false** | 截断旧内容省下的是 hit 价 token（¥0.02/M），作废前缀要按 miss 价（¥1/M）重算，净亏；且截断本身是信息损失 |
 | 重写预算**固定**（不再传实时 budget） | 即使显式开启，也保证「同一段内容永远重写成同一段文本」；`rewriteHistory` 回调签名已移除预算参数，防止回归 |
 | `semanticCacheEnabled` 默认 **false** | 相似度复用会在连续两次「继续」时让模型不被调用、重放上一轮回答，属降智 |
+| `toolAttentionEnabled` 默认 **false** | 工具表在 prompt 最前面，按意图桶每轮重选会让整段缓存作废；它省下的 schema token 只有 hit 价，量级差 50 倍。工具目录仍回填，`search_tools` 照常可用 |
+| **TTL Keepalive**（默认开，`keepaliveEnabled`） | 轮内与跨轮两种损失中，跨轮那 14.5% 只能靠「过期前用逐字节相同的前缀重放一次」拿回来；最多续 4 次、真实请求一到即取消 |
 
 验收口径相应改为：**在不降智的前提下尽可能降本**，真实降幅以
 `savings.json.realBill.reduction`（provider usage × 官方单价）为准，
-理论上限 44.2% 写死在 `docs/REAL-BILL-ANALYSIS.md` 里，不允许再出现 token 口径的「降幅」。
+理论上限 44.2%、可及上限约 35.6% 写死在 `docs/REAL-BILL-ANALYSIS.md` 里，
+不允许再出现 token 口径的「降幅」。
 
-### 下一步（按收益排序）
+### 下一步
 
-1. **TTL Keepalive（武器 30）**：provider 缓存约 4 分钟过期，跨轮空闲后首个请求必然全 miss。
-   在过期前按 `hit` 价重放一次前缀，可把「用户思考几分钟后回来」这一整段 miss 变成 hit。
-   必须严格在 TTL 之前触发，否则 keepalive 自己就变成一次全价 miss。
-2. **重写关闭后的实测**：需要重启宿主让新 `dist` 生效，再对比 `realBill.reduction` 与命中率。
+1. **实测**：需要重启宿主让新 `dist` 生效，然后对比 `savings.json.realBill`
+   的 `reduction` / `cacheHitRate` / `byPurpose['cache-keepalive']`，确认这三项改动
+   真的把轮内命中率抬起来、并且保活支出小于它换回来的命中。
+2. 若轮内命中率仍偏低，按 `tools/cache-opportunity.mjs` 的拆分继续抓剩余的前缀打断点
+   （宿主自身的 toolResultPruner / compaction 也在改写前缀，需要单独测量）。
 
 ---
 
-## 6. 复现
+## 8. 复现
 
 ```powershell
 cd D:\PC\dsh\dsh-context-manager
-node tools\bill-all.mjs                                  # 全机器 15 会话汇总 + 上限
+node tools\bill-all.mjs                                  # 全机器汇总 + 物理上限
+node tools\cache-opportunity.mjs                          # 轮内 vs 跨轮的缓存损失拆分
 node tools\billing-report.mjs <session.v4.jsonl.zstd>     # 单会话真实账单
 node tools\ceiling.mjs <session.v4.jsonl.zstd>            # 工具输出可及性
 node tools\prefix-stability.mjs <session.v4.jsonl.zstd>   # 前缀稳定性 / 命中率

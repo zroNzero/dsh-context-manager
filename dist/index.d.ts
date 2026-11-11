@@ -35,6 +35,10 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     outputMaxTokens: z.ZodDefault<z.ZodNumber>;
     semanticCacheThreshold: z.ZodDefault<z.ZodNumber>;
     semanticCacheEnabled: z.ZodDefault<z.ZodBoolean>;
+    keepaliveEnabled: z.ZodDefault<z.ZodBoolean>;
+    keepaliveTtlMs: z.ZodDefault<z.ZodNumber>;
+    keepaliveRefreshes: z.ZodDefault<z.ZodNumber>;
+    keepaliveMinPromptTokens: z.ZodDefault<z.ZodNumber>;
     toolAttentionEnabled: z.ZodDefault<z.ZodBoolean>;
     toolAttentionTopK: z.ZodDefault<z.ZodNumber>;
     localBaseUrl: z.ZodDefault<z.ZodString>;

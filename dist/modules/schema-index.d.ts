@@ -97,6 +97,23 @@ export interface SchemaCompressorOptions {
     };
     onOutputTruncated?: (reason: 'max_tokens' | 'json_closed' | 'code_closed') => void;
     /**
+     * TTL Keepalive（武器 30）：在 provider 缓存过期前，用逐字节相同的载荷重放一次
+     * （maxTokens=1）把缓存续上。默认关闭，由 apply() 按配置显式打开。
+     */
+    keepalive?: {
+        enabled?: boolean;
+        /** provider 缓存 TTL，默认 240_000ms。 */
+        ttlMs?: number;
+        /** 一次空闲期最多续几次，默认 4。 */
+        refreshes?: number;
+        /** 低于这个 prompt 规模不值得续，默认 8000 token。 */
+        minPromptTokens?: number;
+        /** 在 TTL 的这个比例处触发，默认 0.5。 */
+        marginRatio?: number;
+        /** 触发延迟下限，默认 5000ms（测试用）。 */
+        minDelayMs?: number;
+    };
+    /**
      * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
      * 并同时给出同一请求压缩前/后的载荷字符数，供 BillingLedger 实测校准。
      */

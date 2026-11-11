@@ -3,18 +3,26 @@
 ## Unreleased — 缓存安全与真实账单（2026-11-11）
 
 真实账单分析（`docs/REAL-BILL-ANALYSIS.md`）显示：prompt 缓存命中 ¥0.02/M、未命中 ¥1/M，
-相差 50 倍；因此任何改动「已经发出去的前缀」的压缩都是净亏。
+相差 50 倍；因此任何改动「已经发出去的前缀」的压缩都是净亏。全机器 15 个真实会话拆账：
+轮内 miss 占全部 miss 的 59.3%（¥8.43，账单 21.1%）、跨轮 miss 占 40.7%（¥5.79，14.5%）。
 
 - **真实账本**：`src/modules/billing.ts` 只认 provider 的 `StreamChunk.usage`，
   缺 usage 一律不入账（拒绝估算补齐）；`real-bill.md` / `savings.json.realBill` /
   `costkiller_status` 均可查；反事实成本用本请求实测的「字符→token」系数换算。
+  没有任何削减的付费请求**同样计入分母**，避免把降幅系统性放大。
 - **历史重写默认关闭**（`rewriteEnabled: false`）：它把已发出的旧消息截短，
   作废整段缓存前缀（实测轮内命中率只剩 24.2%），换来的只是 hit 价 token 的节省。
 - **重写预算固定**：即使显式开启，也只依赖「消息内容 + 固定配置」，
   不再按实时 token 数漂移；`rewriteHistory` 回调已不再暴露预算参数。
 - **语义复用默认关闭**（`semanticCacheEnabled: false`）：连续两次「继续」会让模型
   不被调用、直接重放上一轮回答。
-- 测试：self-test 19/19、verify 23/23（新增缓存前缀不变量、真实 usage 账本用例）。
+- **动态工具集默认关闭**（`toolAttentionEnabled: false`）：工具表位于 prompt 最前面，
+  按意图桶每轮重选会作废整段缓存；工具目录仍回填，`search_tools` 照常可用。
+- **TTL Keepalive**（`keepaliveEnabled`，默认开）：在缓存过期前用逐字节相同的前缀
+  重放一次（`maxTokens=1`）续命，最多 4 次，真实请求一到即取消；它自己的费用
+  也记进真实账本（`purpose: cache-keepalive`）。
+- 测试：self-test 19/19、verify 26/26（新增前缀不变量、工具块稳定性、
+  keepalive 触发/上限/小 prompt 不触发、真实 usage 账本用例）。
 
 ## Unreleased — 真实计费与输出端杠杆
 

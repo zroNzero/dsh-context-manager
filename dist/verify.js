@@ -122,7 +122,8 @@ async function main() {
         tools: { register: (definition) => { tools.push(definition); return () => { }; } },
         on: (event, fn) => { hooks.set(event, fn); return () => { }; },
     };
-    const disposer = (0, index_1.apply)(ctx, cfg);
+    // 本用例验证「分层/懒加载」路径本身，需显式打开（默认已关闭，见 index.ts 注释）。
+    const disposer = (0, index_1.apply)(ctx, { ...cfg, toolAttentionEnabled: true });
     await check('apply registers prompt section/tool/hooks', () => {
         assert(sections.some((section) => section.order === 46), 'section order 46 missing');
         assert(tools.some((tool) => tool.name === 'costkiller_status'), 'status tool missing');
@@ -525,6 +526,104 @@ async function main() {
         assert(JSON.stringify(first).length < JSON.stringify(seed).length, 'rewrite did nothing, invariant is vacuous');
         dispose7();
     });
+    await check('cache keepalive refreshes the identical prefix before TTL', async () => {
+        const calls = [];
+        const llm = {
+            stream(request) {
+                calls.push(request);
+                return (async function* () {
+                    yield { type: 'usage', usage: { inputTokens: 500, cacheReadTokens: 19_500, outputTokens: 5 } };
+                })();
+            },
+        };
+        const dispose = (0, schema_index_1.installSchemaCompressor)({ llm }, {
+            enabled: true,
+            keepalive: { enabled: true, ttlMs: 30, refreshes: 2, minPromptTokens: 1000, marginRatio: 0.5, minDelayMs: 15 },
+        });
+        try {
+            const payload = {
+                provider: 'deepseek-account',
+                model: 'deepseek-flash',
+                purpose: 'agent-loop',
+                sessionId: 'keepalive-session',
+                messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+                tools: [],
+            };
+            for await (const _chunk of llm.stream(payload)) {
+                /* drain */
+            }
+            assert(calls.length === 1, `expected 1 real call, got ${calls.length}`);
+            await new Promise((resolve) => setTimeout(resolve, 70));
+            assert(calls.length >= 2, 'keepalive never fired');
+            const ka = calls[1];
+            assert(ka.maxTokens === 1, 'keepalive must cap output tokens at 1');
+            assert(ka.purpose === 'cache-keepalive', `keepalive purpose lost: ${ka.purpose}`);
+            assert(ka.signal === undefined, 'keepalive must not inherit the finished request signal');
+            // 前缀必须逐字节一致，否则续的是另一个缓存条目，纯烧钱
+            assert(JSON.stringify(ka.messages) === JSON.stringify(calls[0].messages), 'keepalive payload drifted from the real prefix');
+            assert(JSON.stringify(ka.tools) === JSON.stringify(calls[0].tools), 'keepalive tools drifted');
+            // 次数上限：refreshes=2 -> 最多 2 次保活
+            assert(calls.length <= 3, `keepalive exceeded its refresh budget: ${calls.length} calls`);
+        }
+        finally {
+            dispose();
+        }
+        const settled = calls.length;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        assert(calls.length === settled, 'keepalive kept firing after dispose');
+    });
+    await check('cache keepalive stays silent for small prompts', async () => {
+        const calls = [];
+        const llm = {
+            stream(request) {
+                calls.push(request);
+                return (async function* () {
+                    yield { type: 'usage', usage: { inputTokens: 200, cacheReadTokens: 0, outputTokens: 5 } };
+                })();
+            },
+        };
+        const dispose = (0, schema_index_1.installSchemaCompressor)({ llm }, {
+            enabled: true,
+            keepalive: { enabled: true, ttlMs: 30, refreshes: 2, minPromptTokens: 1000, minDelayMs: 15 },
+        });
+        try {
+            for await (const _chunk of llm.stream({
+                provider: 'p',
+                model: 'deepseek-flash',
+                messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+            })) {
+                /* drain */
+            }
+            await new Promise((resolve) => setTimeout(resolve, 60));
+            assert(calls.length === 1, `small prompt must not trigger keepalive, got ${calls.length} calls`);
+        }
+        finally {
+            dispose();
+        }
+    });
+    await check('cache: the tool block stays identical across turns by default', async () => {
+        // 工具表位于 prompt 最前面：它一变，整段缓存作废（miss ¥1/M vs hit ¥0.02/M）。
+        // 所以默认模式必须让 tools 只依赖「工具集合本身」，不依赖这一轮用户说了什么。
+        const captured = [];
+        const ctxT = { systemPrompt: { section: () => () => { } }, tools: { register: () => () => { } }, on: () => () => { } };
+        ctxT.llm = {
+            stream(request) {
+                captured.push(request);
+                return (async function* () { })();
+            },
+        };
+        const disposeT = (0, index_1.apply)(ctxT, cfg);
+        const tools = Array.from({ length: 12 }, (_, index) => ({
+            name: `tool_${index}`,
+            description: `用于第 ${index} 类任务的很长描述 `.repeat(12),
+            parameters: { type: 'object', properties: { scope: { type: 'string' } } },
+        }));
+        ctxT.llm.stream({ provider: 'p', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: '重构登录模块的鉴权流程' }] }], tools });
+        ctxT.llm.stream({ provider: 'p', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: '帮我查一下数据库连接池的泄漏' }] }], tools });
+        assert(captured.length === 2, `expected 2 requests, got ${captured.length}`);
+        assert(JSON.stringify(captured[0].tools) === JSON.stringify(captured[1].tools), 'tool block changed between turns and would void the prompt cache');
+        disposeT();
+    });
     await check('response cache replays identical request', async () => {
         const ctx6 = { systemPrompt: { section: () => () => { } }, tools: { register: () => () => { } }, on: () => () => { } };
         let calls = 0;
@@ -576,7 +675,7 @@ async function main() {
                 return (async function* () { })();
             },
         };
-        const dispose7 = (0, index_1.apply)(ctx7, cfg);
+        const dispose7 = (0, index_1.apply)(ctx7, { ...cfg, toolAttentionEnabled: true });
         const manyTools = Array.from({ length: 80 }, (_, index) => ({
             name: `bulk_tool_${index}`,
             description: `bulk tool ${index} handles data processing`,

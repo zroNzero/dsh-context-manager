@@ -367,7 +367,8 @@ check('billing.real-usage-only', () => {
     assert(snapshot.requests === 2, `booked=${snapshot.requests}`);
     assert(snapshot.reduction > 0 && snapshot.reduction < 1, `reduction=${snapshot.reduction}`);
     assert(snapshot.cacheHitRate > 0 && snapshot.cacheHitRate < 1, `hitRate=${snapshot.cacheHitRate}`);
-    // 未验证的输出截断收益不得混进降幅
+    // 未验证的输出截断收益不得混进降幅；而且「没有削减的付费请求」必须稀释降幅
+    // （排除它们会把分母做小、系统性放大降幅）。
     const before = snapshot.reduction;
     ledger.record({
         at: Date.UTC(2026, 10, 11, 12, 0, 0),
@@ -377,7 +378,10 @@ check('billing.real-usage-only', () => {
         afterChars: 1000,
         unverifiedOutputTokens: 5000,
     });
-    assert(ledger.snapshot().reduction === before, 'unverified output must not move the reduction');
+    const after = ledger.snapshot();
+    assert(after.unverifiedOutputTokens === 5000, 'unverified output must be tracked separately');
+    assert(after.reduction <= before, 'a paid request with no reduction must dilute the reduction, never raise it');
+    assert(after.requests === 3 && after.requestsWithoutReduction === 1, 'zero-reduction request must be billed');
 });
 // ---------------------------------------------------------------------------
 // 10) 语义复用必须默认关闭（不降智）：同一句话的第二轮不能重放上一轮回答
