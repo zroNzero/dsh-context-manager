@@ -15,3 +15,5 @@ session-dump.jsonl
 .session-*
 savings.json
 savings.md
+real-bill.md
+tools/out-*.txt

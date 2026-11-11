@@ -23,6 +23,7 @@ const history_rewriter_1 = require("./modules/history-rewriter");
 const memory_1 = require("./modules/memory");
 const host_sim_1 = require("./host-sim");
 const savings_ledger_1 = require("./modules/savings-ledger");
+const billing_1 = require("./modules/billing");
 const workspace_1 = require("./modules/workspace");
 const log_1 = require("./log");
 const outcomes = [];
@@ -321,6 +322,63 @@ check('workspace.safe-proxy', () => {
 // ---------------------------------------------------------------------------
 // 汇总
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 9) 真实账本：只认 provider usage，费率与字符比校准都要能对上
+// ---------------------------------------------------------------------------
+check('billing.real-usage-only', () => {
+    const ledger = new billing_1.BillingLedger();
+    // 红线：没有 provider usage 就绝不入账（禁止用估算补齐）
+    assert(ledger.record({ model: 'deepseek-flash', usage: undefined, beforeChars: 10, afterChars: 5 }) === null, 'missing usage must not be booked');
+    assert(ledger.snapshot().requests === 0, 'no phantom requests without usage');
+    // 空闲时段（北京 20:00）：flash hit 0.02 / miss 1 / output 4
+    const offpeak = ledger.record({
+        at: Date.UTC(2026, 10, 11, 12, 0, 0),
+        purpose: 'agent-loop',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 1000, cacheReadTokens: 9000, outputTokens: 500 },
+        beforeChars: 50_000,
+        afterChars: 40_000,
+    });
+    const expectedOffpeak = (1000 * 1 + 9000 * 0.02 + 500 * 4) / 1e6;
+    assert(Math.abs(offpeak.actualCost - expectedOffpeak) < 1e-9, `offpeak cost ${offpeak.actualCost} != ${expectedOffpeak}`);
+    assert(offpeak.window === 'offpeak' && offpeak.peak === false, `window=${offpeak.window}`);
+    // 实测字符比：10000 prompt token / 40000 字符 = 0.25 token/char → 移除 10000 字符 = 2500 token
+    assert(offpeak.removedPromptTokens === 2500, `removedPromptTokens=${offpeak.removedPromptTokens}`);
+    // 命中比例取本请求实测值 = 9000/10000
+    assert(offpeak.savedHitTokens === 2250, `savedHit=${offpeak.savedHitTokens}`);
+    assert(offpeak.savedMissTokens === 250, `savedMiss=${offpeak.savedMissTokens}`);
+    assert(offpeak.counterfactualCost > offpeak.actualCost, 'counterfactual must exceed actual');
+    assert(Math.abs(offpeak.savedCost - (offpeak.counterfactualCost - offpeak.actualCost)) < 1e-12, 'savedCost identity');
+    // 高峰时段（北京 10:00）：flash hit 0.04 / miss 2 / output 8
+    const peak = ledger.record({
+        at: Date.UTC(2026, 10, 11, 2, 0, 0),
+        purpose: 'agent-loop',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 1000, cacheReadTokens: 0, outputTokens: 100 },
+        beforeChars: 2000,
+        afterChars: 1000,
+    });
+    assert(peak.window === 'peak', `peak window expected, got ${peak.window}`);
+    const expectedPeak = (1000 * 2 + 100 * 8) / 1e6;
+    assert(Math.abs(peak.actualCost - expectedPeak) < 1e-9, `peak cost ${peak.actualCost} != ${expectedPeak}`);
+    // 无缓存命中：全部按 miss 价补偿
+    assert(peak.savedHitTokens === 0 && peak.savedMissTokens === peak.removedPromptTokens, 'miss-only split');
+    const snapshot = ledger.snapshot();
+    assert(snapshot.requests === 2, `booked=${snapshot.requests}`);
+    assert(snapshot.reduction > 0 && snapshot.reduction < 1, `reduction=${snapshot.reduction}`);
+    assert(snapshot.cacheHitRate > 0 && snapshot.cacheHitRate < 1, `hitRate=${snapshot.cacheHitRate}`);
+    // 未验证的输出截断收益不得混进降幅
+    const before = snapshot.reduction;
+    ledger.record({
+        at: Date.UTC(2026, 10, 11, 12, 0, 0),
+        model: 'deepseek-flash',
+        usage: { inputTokens: 100, outputTokens: 100 },
+        beforeChars: 1000,
+        afterChars: 1000,
+        unverifiedOutputTokens: 5000,
+    });
+    assert(ledger.snapshot().reduction === before, 'unverified output must not move the reduction');
+});
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {
     process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'} ${item.name} :: ${item.detail}\n`);

@@ -62,6 +62,7 @@ const schema_index_1 = require("./modules/schema-index");
 const breaker_1 = require("./modules/breaker");
 const dedup_bus_1 = require("./modules/dedup-bus");
 const savings_ledger_1 = require("./modules/savings-ledger");
+const billing_1 = require("./modules/billing");
 const workspace_1 = require("./modules/workspace");
 const history_rewriter_1 = require("./modules/history-rewriter");
 const response_cache_1 = require("./modules/response-cache");
@@ -321,6 +322,7 @@ function apply(ctx, rawConfig = {}) {
     const breaker = new breaker_1.CompressionBreaker({ name: 'extraction', failureThreshold: 3, cooldownMs: 10 * 60_000 });
     const dedup = new dedup_bus_1.DedupBus(256);
     const ledger = new savings_ledger_1.SavingsLedger();
+    const billing = new billing_1.BillingLedger();
     const responseCache = new response_cache_1.ResponseCache({ ttlMs: config.responseCacheTtlMs, similarityThreshold: config.semanticCacheThreshold });
     const toolPipe = new tool_pipe_1.ToolPipe(path.resolve(config.spillDir));
     const toolSchemas = new Map();
@@ -344,11 +346,16 @@ function apply(ctx, rawConfig = {}) {
         void probeLocal();
     const savingsMarkdown = path.resolve(process.cwd(), 'savings.md');
     const savingsJson = path.resolve(process.cwd(), 'savings.json');
+    const realBillMarkdown = path.resolve(process.cwd(), 'real-bill.md');
     let savingsTimer = null;
     const persistSavings = () => {
         try {
-            fs.writeFileSync(savingsJson, JSON.stringify(ledger.snapshot(), null, 2), 'utf8');
-            fs.writeFileSync(savingsMarkdown, ledger.renderMarkdown(), 'utf8');
+            // realBill 是 Gate 1 的唯一可信口径：全部来自 provider usage，不含估算。
+            const snapshot = { ...ledger.snapshot() };
+            snapshot.realBill = billing.snapshot();
+            fs.writeFileSync(savingsJson, JSON.stringify(snapshot, null, 2), 'utf8');
+            fs.writeFileSync(savingsMarkdown, `${ledger.renderMarkdown()}\n\n${billing.renderMarkdown()}`, 'utf8');
+            fs.writeFileSync(realBillMarkdown, billing.renderMarkdown(), 'utf8');
         }
         catch {
             /* 面板写盘失败不影响主链路 */
@@ -413,6 +420,7 @@ function apply(ctx, rawConfig = {}) {
     try {
         const toolDisposer = services.tools?.register?.(buildStatusTool(() => {
             const snapshot = ledger.snapshot();
+            const real = billing.snapshot();
             return {
                 ok: true,
                 admitted: counters.admitted,
@@ -436,6 +444,22 @@ function apply(ctx, rawConfig = {}) {
                 schemaVersion: snapshot.schemaVersion,
                 ledgerId: snapshot.ledgerId,
                 revision: snapshot.revision,
+                // 真实账单：只用 provider usage × 官方单价，estimates 上面那些字段不是验收口径。
+                realBilling: {
+                    requests: real.requests,
+                    currency: real.currency,
+                    actualCost: Number(real.actualCost.toFixed(6)),
+                    counterfactualCost: Number(real.counterfactualCost.toFixed(6)),
+                    savedCost: Number(real.savedCost.toFixed(6)),
+                    reduction: Number((real.reduction * 100).toFixed(2)),
+                    cacheHitRate: Number((real.cacheHitRate * 100).toFixed(2)),
+                    missTokens: real.missTokens,
+                    hitTokens: real.hitTokens,
+                    outputTokens: real.outputTokens,
+                    unverifiedOutputTokens: real.unverifiedOutputTokens,
+                    lastPricing: real.lastPricing,
+                },
+                realBillFile: realBillMarkdown,
                 savingsFile: savingsMarkdown,
             };
         }));
@@ -539,6 +563,23 @@ function apply(ctx, rawConfig = {}) {
             outputGuard: { enabled: config.outputGuardEnabled, maxTokens: config.outputMaxTokens },
             onOutputTruncated: (reason) => (0, log_1.logEvent)('info', 'output.truncated', { module: 'OutputGuard', reason, maxTokens: config.outputMaxTokens }),
             toolAttention: { enabled: config.toolAttentionEnabled, topK: config.toolAttentionTopK },
+            onUsage: ({ purpose, model, usage, beforeChars, afterChars }) => {
+                const record = billing.record({ purpose, model, usage, beforeChars, afterChars });
+                if (record)
+                    (0, log_1.logEvent)('debug', 'billing.recorded', {
+                        module: 'Billing',
+                        purpose: record.purpose,
+                        model: record.model,
+                        window: record.window,
+                        missTokens: record.missTokens,
+                        hitTokens: record.hitTokens,
+                        outputTokens: record.outputTokens,
+                        removedPromptTokens: record.removedPromptTokens,
+                        actualCost: Number(record.actualCost.toFixed(6)),
+                        savedCost: Number(record.savedCost.toFixed(6)),
+                    });
+                scheduleSavings();
+            },
             onToolCatalog: (tools) => {
                 toolSchemas.clear();
                 for (const tool of tools)

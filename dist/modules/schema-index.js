@@ -136,6 +136,27 @@ function selectStableToolSet(tools, prompt, options = {}) {
         hidden: tools.filter((tool) => !keptNames.has(String(tool.name ?? ''))).map((tool) => String(tool.name ?? '')),
     };
 }
+/** 模型可见载荷的字符数（system + messages + tools），用于真实账本的字符比校准。 */
+function payloadChars(request) {
+    if (!request)
+        return 0;
+    const system = typeof request.system === 'string' ? request.system.length : 0;
+    let messages = 0;
+    let tools = 0;
+    try {
+        messages = Array.isArray(request.messages) ? JSON.stringify(request.messages).length : 0;
+    }
+    catch {
+        messages = 0;
+    }
+    try {
+        tools = Array.isArray(request.tools) ? JSON.stringify(request.tools).length : 0;
+    }
+    catch {
+        tools = 0;
+    }
+    return system + messages + tools;
+}
 /** 粗略估算消息侧 token（4 字符/token），用于面板比例的分母。 */
 function estimateMessagesTokens(messages) {
     if (!Array.isArray(messages))
@@ -354,17 +375,47 @@ function installSchemaCompressor(ctx, options = {}) {
     };
     const originalStream = llm.stream;
     const originalPrepare = llm.prepareCall;
+    const observeUsage = (chunk, optimized, beforeChars, afterChars) => {
+        if (!options.onUsage || chunk?.type !== 'usage' || !chunk.usage)
+            return;
+        try {
+            options.onUsage({
+                purpose: String(optimized?.purpose ?? 'agent-loop'),
+                model: String(optimized?.model ?? ''),
+                usage: chunk.usage,
+                beforeChars,
+                afterChars,
+            });
+        }
+        catch (error) {
+            (0, log_1.logEvent)('warn', 'billing.usage_failed', { module: 'Billing', error: String(error) });
+        }
+    };
+    /** 在透传 chunk 的同时把 provider usage 交给真实账本；不改动流本身。 */
+    const invokeMeasured = (invoke, optimized, beforeChars, afterChars) => {
+        const source = invoke(optimized);
+        if (!source || typeof source[Symbol.asyncIterator] !== 'function')
+            return source;
+        return (async function* () {
+            for await (const chunk of source) {
+                observeUsage(chunk, optimized, beforeChars, afterChars);
+                yield chunk;
+            }
+        })();
+    };
     const runOptimized = (invoke, request) => {
+        const beforeChars = payloadChars(request);
         const optimized = transform(request);
+        const afterChars = payloadChars(optimized);
         const cache = options.responseCache;
         if (!cache)
-            return invoke(optimized);
+            return invokeMeasured(invoke, optimized, beforeChars, afterChars);
         let key;
         try {
             key = cache.keyFor(optimized);
         }
         catch {
-            return invoke(optimized);
+            return invokeMeasured(invoke, optimized, beforeChars, afterChars);
         }
         const hit = cache.get(key);
         if (hit) {
@@ -390,6 +441,7 @@ function installSchemaCompressor(ctx, options = {}) {
         return (async function* () {
             const chunks = [];
             for await (const chunk of stream) {
+                observeUsage(chunk, optimized, beforeChars, afterChars);
                 chunks.push(chunk);
                 yield chunk;
             }

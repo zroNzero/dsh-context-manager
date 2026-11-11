@@ -89,6 +89,22 @@ export interface SchemaCompressorOptions {
         maxTokens: number;
     };
     onOutputTruncated?: (reason: 'max_tokens' | 'json_closed' | 'code_closed') => void;
+    /**
+     * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
+     * 并同时给出同一请求压缩前/后的载荷字符数，供 BillingLedger 实测校准。
+     */
+    onUsage?: (info: {
+        purpose: string;
+        model: string;
+        usage: {
+            inputTokens?: number;
+            outputTokens?: number;
+            cacheReadTokens?: number;
+            cacheWriteTokens?: number;
+        };
+        beforeChars: number;
+        afterChars: number;
+    }) => void;
 }
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。

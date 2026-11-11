@@ -23,6 +23,8 @@ const node_path_1 = __importDefault(require("node:path"));
 const index_1 = require("./index");
 const contracts_1 = require("./contracts");
 const extraction_1 = require("./modules/extraction");
+const schema_index_1 = require("./modules/schema-index");
+const billing_1 = require("./modules/billing");
 const results = [];
 function check(label, fn) {
     return Promise.resolve()
@@ -144,6 +146,54 @@ async function main() {
         const systemText = JSON.stringify((sent.messages ?? []).find((message) => message?.role === 'system') ?? {});
         assert(systemText.includes('[TOOL_CATALOG]'), 'tool catalog missing from system message');
         assert(systemText.includes('[TOOL_NOT_LOADED]'), 'explicit not-loaded hint missing');
+    });
+    await check('billing captures provider usage from the live stream', async () => {
+        const seen = [];
+        const llm = {
+            stream(_request) {
+                return (async function* () {
+                    yield { type: 'text-delta', index: 0, text: 'ok' };
+                    yield { type: 'usage', usage: { inputTokens: 1200, cacheReadTokens: 800, outputTokens: 340 } };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                })();
+            },
+        };
+        const billingTools = Array.from({ length: 30 }, (_, index) => ({
+            name: `bill_tool_${index}`,
+            description: 'very long billable description '.repeat(20),
+            parameters: { type: 'object', properties: { p: { type: 'string' } } },
+        }));
+        const dispose = (0, schema_index_1.installSchemaCompressor)({ llm }, {
+            enabled: true,
+            maxDescriptionChars: 40,
+            onUsage: (info) => seen.push(info),
+        });
+        try {
+            const stream = llm.stream({
+                provider: 'deepseek-account',
+                model: 'deepseek-flash',
+                purpose: 'agent-loop',
+                messages: [{ role: 'user', content: [{ type: 'text', text: '分析' }] }],
+                tools: billingTools,
+            });
+            for await (const _chunk of stream) {
+                /* drain: usage 只在消费时才可见 */
+            }
+        }
+        finally {
+            dispose();
+        }
+        assert(seen.length === 1, `usage callback fired ${seen.length} times`);
+        const info = seen[0];
+        assert(info.usage.inputTokens === 1200 && info.usage.cacheReadTokens === 800, 'usage passthrough broken');
+        assert(info.purpose === 'agent-loop', `purpose lost: ${info.purpose}`);
+        assert(info.beforeChars > info.afterChars, `payload chars not reduced: ${info.beforeChars}->${info.afterChars}`);
+        const ledger = new billing_1.BillingLedger();
+        const record = ledger.record(info);
+        assert(record !== null, 'billing refused a real usage record');
+        assert(record.actualCost > 0, 'real cost must be positive');
+        assert(record.removedPromptTokens > 0, 'measured removal must be positive after schema compression');
+        assert(ledger.snapshot().reduction > 0, 'reduction must be positive');
     });
     await check('schema install defers until llm service is ready', async () => {
         const ctx2 = {
