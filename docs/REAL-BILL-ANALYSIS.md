@@ -321,7 +321,8 @@ reasoningEffort / temperature / maxTokens / stop），dispatch 前严格比较�
 
 1. profile 长期用 `max` 是纯浪费；
 2. 真正干活的步骤**不该**掉到 `low` —— 花一样的钱、少一半思考。执行步现在兜底在 `high`；
-3. 只有机械轮次（trivial/easy）才降到 `off`，那里才是真省（96 vs 608）。
+3. 只有 `trivial`（机械任务：格式化/翻译/改名…）才降到 `off`，那里才是真省（96 vs 608）。
+   `easy` 的判据只是「用户消息短」，而短消息往往最含糊，执行步现在也用 `high` 兜底。
 
 ### 换算到账单
 
@@ -353,3 +354,76 @@ node tools\prefix-stability.mjs <session.v4.jsonl.zstd>   # 前缀稳定性 / �
 ```
 
 计价口径固定为 `src/modules/pricing.ts`；高峰/空闲按北京时间自动判定。
+
+---
+
+## 13. 干净 epoch 实测：23.2%（2026-11-11 13:03:52Z 起，构建 c88115b）
+
+前面所有降幅数字都因为两个记账缺陷而不可信（见 §14）。修完之后第一次拿到**同一构建、
+同一会话、零跨版本混算**的口径。
+
+窗口：`apply.start 13:03:52.715Z` 起，15 条 `agent-loop` 请求。
+
+| 项 | 值 |
+|---|---:|
+| 真实花费 | **¥0.0663** |
+| 反事实（全程 max、无压缩） | ¥0.0864 |
+| **真实降幅** | **23.18%** |
+| 无降幅请求（对照组） | **0 / 15** |
+| miss / hit / output | 39,599 / 129,152 / 6,040 |
+| 缓存命中率 | 76.5% |
+
+账单结构（这一窗口）：
+
+| 组成 | token | 金额 | 占比 |
+|---|---:|---:|---:|
+| miss（1 元/M） | 39,599 | ¥0.0396 | **59.7%** |
+| output（4 元/M） | 6,040 | ¥0.0242 | **36.4%** |
+| hit（0.02 元/M） | 129,152 | ¥0.0026 | 3.9% |
+
+降幅全部来自输出侧：15/15 请求跑在 `high`（baseline `max`），output 6,040 而满档需 ~10,675，
+**−43.4%**，与 §11 的配对校准（−43.4%）完全吻合——校准值和实盘对上了。
+
+### 为什么是 23% 而不是 50%
+
+- **miss 39,599 token 是真正的新内容**（每一步新增的 assistant 输出 + 工具结果），
+  不发出去就没法继续，压不动。
+- **hit 129,152 token 只值 ¥0.0026**。提示词侧再怎么压，压的都是 0.02 元/M 的区。
+  所以 schema 压缩省了 43,602 token，账单上只体现 ¥0.0016。
+- 输出侧已经到 `high`（模型自己的 "default balance for most tasks"）。再往下：
+  `high→low` 实测不省钱（344 vs 357），`off` 是关思考（降智），都被排除。
+
+极端上界：即使把 miss 全部消灭（不可能），账单也只能到 ¥0.0452 → 46.7%。
+**Gate 1 的 ≥50% 在现有单价下物理不可达**，与 §11 的 44.2% 上界结论一致；
+23.2% 已经是「不降智」约束下可及部分（≈25%）的绝大部分。
+
+### 复现
+
+```powershell
+node tools\effort-join.mjs <profile>\debug.log --since 2026-11-11T13:03:52Z
+```
+
+---
+
+## 14. 两个把降幅记账归零的缺陷（2026-11-11 已修）
+
+**缺陷 1：effort 记账带 5 秒过期。**
+
+```ts
+effortContext: () => lastEffort && Date.now() - lastEffort.at < 5000 ? ... : null
+```
+
+一次请求从决策到收到 `usage` 要 1.3–5.6 秒，长上下文更久。超过 5 秒的请求全部记成
+`effort: null` → `avoidedOutputTokens = 0`。实测 31 条记录里只记到 4,593，真值 48,303
+（**漏记 90%**），而且漏掉的恰好是慢的、贵的请求——系统性偏差，不是噪声。
+
+修法：撤销 TTL，pre-step 更新 `effortContext` 时清空 `lastEffort`（按轮次失效）。
+`verify` 增了源码守卫，防止计时器回来。
+
+**缺陷 2：`costkiller_status` 的 output schema 装不下自己的返回值。**
+
+宿主按 `additionalProperties: false` 校验工具返回值，而 `realBilling / realBillFile /
+debugLogFile` 三个字段只出现在返回值里、没写进 schema → 整个工具报
+`returned invalid output`。同一个坑还有 `lastPricing`（首个请求前是 `null`）。
+修法：补全嵌套 schema、给 `lastPricing` 稳定默认值；`verify` 增了递归的
+schema-vs-output 校验，以后不可能只加返回值不加声明。
