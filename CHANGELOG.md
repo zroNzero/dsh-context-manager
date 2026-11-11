@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.0.13 — 2026-11-11
+
+### 分账修正：extraction / admission 不再混记
+
+- 之前「extraction + 落盘指针」的节省全部记到 `extraction`，导致面板
+  `admission` 恒为 0（即使 `admitted=true`）。
+- 现按两段拆账：`extraction` = 原文 → 压缩文；`admission` = 压缩文 → 指针化结果，
+  两者之和仍等于该次工具输出的总节省，`totalSavedTokens` 不变。
+- `byModuleBefore` 同步拆分（extraction before = 原文，admission before = 压缩文）。
+
 ## v1.0.12 — 2026-11-11
 
 ### 恢复 hook 链路 + 工作区解析 + 每维压缩率（schemaVersion 5）

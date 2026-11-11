@@ -529,9 +529,17 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       const saved = Math.max(0, tokensBefore - tokensAfter)
       counters.savedTokens += saved
 
-      if (saved > 0) {
-        const module = extracted && extracted.safe && extracted.mode !== 'none' ? 'extraction' : 'admission'
-        ledger.record(module, saved, `${extracted?.mode ?? 'admission'} ${tokensBefore}->${tokensAfter}`, workspace, tokensBefore)
+      // 分账口径：extraction 负责「原文 → 压缩文」，admission 负责「压缩文 → 指针化结果」，
+      // 两者相加等于 saved，避免把落盘节省全部记到 extraction（面板 admission 一直是 0）。
+      const extractionAfterTokens = estimateTokens(compressed)
+      const extractionSaved = Math.max(0, tokensBefore - extractionAfterTokens)
+      const admissionSaved = Math.max(0, extractionAfterTokens - tokensAfter)
+      if (extractionSaved > 0) {
+        ledger.record('extraction', extractionSaved, extracted?.mode ?? 'none', workspace, tokensBefore)
+        scheduleSavings()
+      }
+      if (admissionSaved > 0) {
+        ledger.record('admission', admissionSaved, 'spill', workspace, extractionAfterTokens)
         scheduleSavings()
       }
 
