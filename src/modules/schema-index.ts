@@ -183,6 +183,36 @@ export interface SchemaCompressorOptions {
   /** 输出端硬截断（v2.0）：超过 maxTokens 或 JSON/代码块闭合后立即停止。 */
   outputGuard?: { enabled?: boolean; maxTokens: number }
   onOutputTruncated?: (reason: 'max_tokens' | 'json_closed' | 'code_closed') => void
+  /**
+   * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
+   * 并同时给出同一请求压缩前/后的载荷字符数，供 BillingLedger 实测校准。
+   */
+  onUsage?: (info: {
+    purpose: string
+    model: string
+    usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+    beforeChars: number
+    afterChars: number
+  }) => void
+}
+
+/** 模型可见载荷的字符数（system + messages + tools），用于真实账本的字符比校准。 */
+function payloadChars(request: any): number {
+  if (!request) return 0
+  const system = typeof request.system === 'string' ? request.system.length : 0
+  let messages = 0
+  let tools = 0
+  try {
+    messages = Array.isArray(request.messages) ? JSON.stringify(request.messages).length : 0
+  } catch {
+    messages = 0
+  }
+  try {
+    tools = Array.isArray(request.tools) ? JSON.stringify(request.tools).length : 0
+  } catch {
+    tools = 0
+  }
+  return system + messages + tools
 }
 
 /** 粗略估算消息侧 token（4 字符/token），用于面板比例的分母。 */
@@ -411,15 +441,44 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   const originalStream = llm.stream
   const originalPrepare = llm.prepareCall
 
+  const observeUsage = (chunk: any, optimized: any, beforeChars: number, afterChars: number): void => {
+    if (!options.onUsage || chunk?.type !== 'usage' || !chunk.usage) return
+    try {
+      options.onUsage({
+        purpose: String(optimized?.purpose ?? 'agent-loop'),
+        model: String(optimized?.model ?? ''),
+        usage: chunk.usage,
+        beforeChars,
+        afterChars,
+      })
+    } catch (error) {
+      logEvent('warn', 'billing.usage_failed', { module: 'Billing', error: String(error) })
+    }
+  }
+
+  /** 在透传 chunk 的同时把 provider usage 交给真实账本；不改动流本身。 */
+  const invokeMeasured = (invoke: (request: any) => any, optimized: any, beforeChars: number, afterChars: number): any => {
+    const source = invoke(optimized)
+    if (!source || typeof source[Symbol.asyncIterator] !== 'function') return source
+    return (async function* () {
+      for await (const chunk of source) {
+        observeUsage(chunk, optimized, beforeChars, afterChars)
+        yield chunk
+      }
+    })()
+  }
+
   const runOptimized = (invoke: (request: any) => any, request: any): any => {
+    const beforeChars = payloadChars(request)
     const optimized = transform(request)
+    const afterChars = payloadChars(optimized)
     const cache = options.responseCache
-    if (!cache) return invoke(optimized)
+    if (!cache) return invokeMeasured(invoke, optimized, beforeChars, afterChars)
     let key: string
     try {
       key = cache.keyFor(optimized)
     } catch {
-      return invoke(optimized)
+      return invokeMeasured(invoke, optimized, beforeChars, afterChars)
     }
     const hit = cache.get(key)
     if (hit) {
@@ -445,6 +504,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     return (async function* () {
       const chunks: any[] = []
       for await (const chunk of stream) {
+        observeUsage(chunk, optimized, beforeChars, afterChars)
         chunks.push(chunk)
         yield chunk
       }

@@ -34,6 +34,7 @@ import { installSchemaCompressor } from './modules/schema-index'
 import { CompressionBreaker } from './modules/breaker'
 import { DedupBus, dedupeKey } from './modules/dedup-bus'
 import { SavingsLedger } from './modules/savings-ledger'
+import { BillingLedger } from './modules/billing'
 import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modules/workspace'
 import { rewriteMessages } from './modules/history-rewriter'
 import { ResponseCache } from './modules/response-cache'
@@ -306,6 +307,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   const breaker = new CompressionBreaker({ name: 'extraction', failureThreshold: 3, cooldownMs: 10 * 60_000 })
   const dedup = new DedupBus(256)
   const ledger = new SavingsLedger()
+  const billing = new BillingLedger()
   const responseCache = new ResponseCache({ ttlMs: config.responseCacheTtlMs, similarityThreshold: config.semanticCacheThreshold })
   const toolPipe = new ToolPipe(path.resolve(config.spillDir))
   const toolSchemas = new Map<string, any>()
@@ -328,12 +330,17 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   if (config.localRouting) void probeLocal()
   const savingsMarkdown = path.resolve(process.cwd(), 'savings.md')
   const savingsJson = path.resolve(process.cwd(), 'savings.json')
+  const realBillMarkdown = path.resolve(process.cwd(), 'real-bill.md')
   let savingsTimer: ReturnType<typeof setTimeout> | null = null
 
   const persistSavings = (): void => {
     try {
-      fs.writeFileSync(savingsJson, JSON.stringify(ledger.snapshot(), null, 2), 'utf8')
-      fs.writeFileSync(savingsMarkdown, ledger.renderMarkdown(), 'utf8')
+      // realBill 是 Gate 1 的唯一可信口径：全部来自 provider usage，不含估算。
+      const snapshot: Record<string, unknown> = { ...(ledger.snapshot() as unknown as Record<string, unknown>) }
+      snapshot.realBill = billing.snapshot()
+      fs.writeFileSync(savingsJson, JSON.stringify(snapshot, null, 2), 'utf8')
+      fs.writeFileSync(savingsMarkdown, `${ledger.renderMarkdown()}\n\n${billing.renderMarkdown()}`, 'utf8')
+      fs.writeFileSync(realBillMarkdown, billing.renderMarkdown(), 'utf8')
     } catch {
       /* 面板写盘失败不影响主链路 */
     }
@@ -396,6 +403,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   try {
     const toolDisposer = services.tools?.register?.(buildStatusTool(() => {
       const snapshot = ledger.snapshot()
+      const real = billing.snapshot()
       return {
         ok: true,
         admitted: counters.admitted,
@@ -419,6 +427,22 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         schemaVersion: snapshot.schemaVersion,
         ledgerId: snapshot.ledgerId,
         revision: snapshot.revision,
+        // 真实账单：只用 provider usage × 官方单价，estimates 上面那些字段不是验收口径。
+        realBilling: {
+          requests: real.requests,
+          currency: real.currency,
+          actualCost: Number(real.actualCost.toFixed(6)),
+          counterfactualCost: Number(real.counterfactualCost.toFixed(6)),
+          savedCost: Number(real.savedCost.toFixed(6)),
+          reduction: Number((real.reduction * 100).toFixed(2)),
+          cacheHitRate: Number((real.cacheHitRate * 100).toFixed(2)),
+          missTokens: real.missTokens,
+          hitTokens: real.hitTokens,
+          outputTokens: real.outputTokens,
+          unverifiedOutputTokens: real.unverifiedOutputTokens,
+          lastPricing: real.lastPricing,
+        },
+        realBillFile: realBillMarkdown,
         savingsFile: savingsMarkdown,
       }
     }))
@@ -521,6 +545,22 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       onOutputTruncated: (reason: string) =>
         logEvent('info', 'output.truncated', { module: 'OutputGuard', reason, maxTokens: config.outputMaxTokens }),
       toolAttention: { enabled: config.toolAttentionEnabled, topK: config.toolAttentionTopK },
+      onUsage: ({ purpose, model, usage, beforeChars, afterChars }) => {
+        const record = billing.record({ purpose, model, usage, beforeChars, afterChars })
+        if (record) logEvent('debug', 'billing.recorded', {
+          module: 'Billing',
+          purpose: record.purpose,
+          model: record.model,
+          window: record.window,
+          missTokens: record.missTokens,
+          hitTokens: record.hitTokens,
+          outputTokens: record.outputTokens,
+          removedPromptTokens: record.removedPromptTokens,
+          actualCost: Number(record.actualCost.toFixed(6)),
+          savedCost: Number(record.savedCost.toFixed(6)),
+        })
+        scheduleSavings()
+      },
       onToolCatalog: (tools) => {
         toolSchemas.clear()
         for (const tool of tools) toolSchemas.set(tool.name, tool)
