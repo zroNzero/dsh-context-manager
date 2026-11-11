@@ -207,6 +207,8 @@ export interface SchemaCompressorOptions {
     marginRatio?: number
     /** 触发延迟下限，默认 5000ms（测试用）。 */
     minDelayMs?: number
+    /** 同时保温的会话数上限，默认 3（防止一堆 subagent 各自烧保活费）。 */
+    maxSessions?: number
   }
   /**
    * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
@@ -487,40 +489,64 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   // - 保活失败/超时对主链路零影响。
   // -------------------------------------------------------------------------
   const keepaliveCfg = options.keepalive
-  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null
-  let keepaliveRemaining = 0
+  interface KeepaliveSlot {
+    timer: ReturnType<typeof setTimeout> | null
+    remaining: number
+    invoke: (request: any) => any
+    request: any
+    promptTokens: number
+  }
+  // 按 session 分开：主 Agent 与多个 subagent 是不同上下文，共用一个槽位会互相顶掉，
+  // 保活就只对「最后一个说话的人」生效。同时限制总的会话数，避免一堆 subagent 各自烧保活费。
+  const keepaliveSlots = new Map<string, KeepaliveSlot>()
+  const maxKeepaliveSessions = Math.max(1, Math.trunc(keepaliveCfg?.maxSessions ?? 3))
   let disposed = false
 
-  const cancelKeepalive = (): void => {
-    if (keepaliveTimer !== null) {
-      clearTimeout(keepaliveTimer)
-      keepaliveTimer = null
+  const cancelSlot = (slot: KeepaliveSlot | undefined): void => {
+    if (slot?.timer) {
+      clearTimeout(slot.timer)
+      slot.timer = null
     }
   }
 
-  const armKeepalive = (invoke: (request: any) => any, optimized: any, promptTokens: number): void => {
-    if (disposed || !keepaliveCfg?.enabled) return
-    if (promptTokens < (keepaliveCfg.minPromptTokens ?? 8000)) {
-      keepaliveRemaining = 0
-      cancelKeepalive()
+  const cancelKeepalive = (key?: string): void => {
+    if (key === undefined) {
+      for (const slot of keepaliveSlots.values()) cancelSlot(slot)
+      keepaliveSlots.clear()
       return
     }
-    if (keepaliveRemaining <= 0) return
+    cancelSlot(keepaliveSlots.get(key))
+    keepaliveSlots.delete(key)
+  }
+
+  const armKeepalive = (key: string, invoke: (request: any) => any, optimized: any, promptTokens: number): void => {
+    if (disposed || !keepaliveCfg?.enabled) return
+    const slot = keepaliveSlots.get(key)
+    if (!slot) return
+    if (promptTokens < (keepaliveCfg.minPromptTokens ?? 8000) || slot.remaining <= 0) {
+      cancelKeepalive(key)
+      return
+    }
+    slot.invoke = invoke
+    slot.request = optimized
+    slot.promptTokens = promptTokens
     const ttl = keepaliveCfg.ttlMs ?? 240_000
     const delay = Math.max(keepaliveCfg.minDelayMs ?? 5_000, Math.floor(ttl * (keepaliveCfg.marginRatio ?? 0.5)))
-    cancelKeepalive()
-    keepaliveTimer = setTimeout(() => {
-      keepaliveTimer = null
-      void runKeepalive(invoke, optimized, promptTokens)
+    cancelSlot(slot)
+    slot.timer = setTimeout(() => {
+      slot.timer = null
+      void runKeepalive(key)
     }, delay)
-    const timer = keepaliveTimer as unknown as { unref?: () => void }
+    const timer = slot.timer as unknown as { unref?: () => void }
     if (typeof timer.unref === 'function') timer.unref()
   }
 
-  const runKeepalive = async (invoke: (request: any) => any, optimized: any, basePromptTokens: number): Promise<void> => {
-    if (disposed || keepaliveRemaining <= 0) return
-    keepaliveRemaining -= 1
-    let promptTokens = basePromptTokens
+  const runKeepalive = async (key: string): Promise<void> => {
+    const slot = keepaliveSlots.get(key)
+    if (disposed || !slot || slot.remaining <= 0) return
+    slot.remaining -= 1
+    const { invoke, request: optimized } = slot
+    let promptTokens = slot.promptTokens
     try {
       const body: any = { ...optimized, maxTokens: 1, purpose: 'cache-keepalive' }
       delete body.signal
@@ -554,24 +580,35 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
         promptTokens,
         cachedTokens: cached,
         freshTokens: fresh,
-        remaining: keepaliveRemaining,
+        remaining: slot.remaining,
       })
     } catch (error) {
       logEvent('warn', 'cache.keepalive_failed', { module: 'Keepalive', error: String(error) })
+      cancelKeepalive(key)
       return
     }
-    if (keepaliveRemaining > 0) armKeepalive(invoke, optimized, promptTokens)
+    armKeepalive(key, invoke, optimized, promptTokens)
   }
 
   const observeUsage = (chunk: any, optimized: any, beforeChars: number, afterChars: number, invoke: (request: any) => any): void => {
     if (chunk?.type !== 'usage' || !chunk.usage) return
     const isKeepalive = optimized?.purpose === 'cache-keepalive'
-    if (!isKeepalive) {
-      // 真实请求发出去了：缓存由它自己刷新，取消挂起的保活并重置额度。
-      cancelKeepalive()
-      keepaliveRemaining = Math.max(0, Math.trunc(keepaliveCfg?.refreshes ?? 4))
-      const promptTokens = (chunk.usage.inputTokens ?? 0) + (chunk.usage.cacheReadTokens ?? 0)
-      armKeepalive(invoke, optimized, promptTokens)
+    if (!isKeepalive && keepaliveCfg?.enabled) {
+      // 真实请求发出去了：它自己会刷新缓存，先撤掉这个会话挂起的保活。
+      const key = String(optimized?.sessionId ?? 'default')
+      const existing = keepaliveSlots.get(key)
+      if (existing) cancelSlot(existing)
+      if (existing || keepaliveSlots.size < maxKeepaliveSessions) {
+        keepaliveSlots.set(key, {
+          timer: null,
+          remaining: Math.max(0, Math.trunc(keepaliveCfg.refreshes ?? 4)),
+          invoke,
+          request: optimized,
+          promptTokens: 0,
+        })
+        const promptTokens = (chunk.usage.inputTokens ?? 0) + (chunk.usage.cacheReadTokens ?? 0)
+        armKeepalive(key, invoke, optimized, promptTokens)
+      }
     }
     if (!options.onUsage) return
     try {

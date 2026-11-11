@@ -13,6 +13,11 @@ import path from 'node:path'
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 const LOG_FILE = path.resolve(process.cwd(), 'debug.log')
+/**
+ * 真实的 debug.log 路径。宿主进程的 cwd 不一定是工作区（桌面端是 profile 根目录），
+ * 所以必须把这个路径暴露出去，否则审计的人会去看工作区里那份只有测试噪音的日志。
+ */
+export const LOG_FILE_PATH = LOG_FILE
 const MAX_LOG_BYTES = 5 * 1024 * 1024
 const ROTATE_CHECK_EVERY = 50
 

@@ -11,10 +11,16 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.LOG_FILE_PATH = void 0;
 exports.logEvent = logEvent;
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const LOG_FILE = node_path_1.default.resolve(process.cwd(), 'debug.log');
+/**
+ * 真实的 debug.log 路径。宿主进程的 cwd 不一定是工作区（桌面端是 profile 根目录），
+ * 所以必须把这个路径暴露出去，否则审计的人会去看工作区里那份只有测试噪音的日志。
+ */
+exports.LOG_FILE_PATH = LOG_FILE;
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 const ROTATE_CHECK_EVERY = 50;
 let writes = 0;

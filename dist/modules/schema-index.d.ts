@@ -112,6 +112,8 @@ export interface SchemaCompressorOptions {
         marginRatio?: number;
         /** 触发延迟下限，默认 5000ms（测试用）。 */
         minDelayMs?: number;
+        /** 同时保温的会话数上限，默认 3（防止一堆 subagent 各自烧保活费）。 */
+        maxSessions?: number;
     };
     /**
      * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，

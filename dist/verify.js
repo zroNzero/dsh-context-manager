@@ -624,6 +624,46 @@ async function main() {
         assert(JSON.stringify(captured[0].tools) === JSON.stringify(captured[1].tools), 'tool block changed between turns and would void the prompt cache');
         disposeT();
     });
+    await check('cache keepalive keeps one chain per session', async () => {
+        // 主 Agent 与 subagent 是不同上下文：共用一个槽位会互相顶掉，只对最后一个生效。
+        const calls = [];
+        const llm = {
+            stream(request) {
+                calls.push(request);
+                return (async function* () {
+                    yield { type: 'usage', usage: { inputTokens: 400, cacheReadTokens: 19_600, outputTokens: 3 } };
+                })();
+            },
+        };
+        const dispose = (0, schema_index_1.installSchemaCompressor)({ llm }, {
+            enabled: true,
+            keepalive: { enabled: true, ttlMs: 30, refreshes: 1, minPromptTokens: 1000, marginRatio: 0.5, minDelayMs: 15, maxSessions: 3 },
+        });
+        try {
+            const send = async (sessionId, text) => {
+                for await (const _chunk of llm.stream({
+                    provider: 'p',
+                    model: 'deepseek-flash',
+                    purpose: 'agent-loop',
+                    sessionId,
+                    messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+                })) {
+                    /* drain */
+                }
+            };
+            await send('session-A', '重构鉴权');
+            await send('session-B', '排查连接池泄漏');
+            await new Promise((resolve) => setTimeout(resolve, 80));
+            const ka = calls.filter((c) => c.purpose === 'cache-keepalive' && c.maxTokens === 1);
+            const texts = ka.map((c) => JSON.stringify(c.messages));
+            assert(new Set(texts).size >= 2, `both sessions must be kept alive independently, got ${ka.length} keepalives`);
+            assert(texts.some((t) => t.includes('重构鉴权')), 'session A keepalive missing');
+            assert(texts.some((t) => t.includes('排查连接池泄漏')), 'session B keepalive missing');
+        }
+        finally {
+            dispose();
+        }
+    });
     await check('response cache replays identical request', async () => {
         const ctx6 = { systemPrompt: { section: () => () => { } }, tools: { register: () => () => { } }, on: () => () => { } };
         let calls = 0;

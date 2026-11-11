@@ -24,7 +24,7 @@ import {
   type Patch,
 } from './contracts'
 import { gatePatch } from './cacheAnchor'
-import { logEvent } from './log'
+import { logEvent, LOG_FILE_PATH } from './log'
 import { runAdmission } from './modules/admission'
 import { runExtraction, buildFirewallSummary } from './modules/extraction'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
@@ -418,7 +418,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   const workspaceFor = (session: any, agent?: any): WorkspaceRef =>
     workspaceRefFromSession(session, agent) ?? workspaceRef('(unknown)')
 
-  logEvent('info', 'apply.start', { plugin: name, config })
+  logEvent('info', 'apply.start', { plugin: name, debugLog: LOG_FILE_PATH, cwd: process.cwd(), config })
   logEvent('info', 'pricing.loaded', pricingLoadedLog(priceFor('deepseek-flash')))
 
   try {
@@ -475,6 +475,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
           lastPricing: real.lastPricing,
         },
         realBillFile: realBillMarkdown,
+        debugLogFile: LOG_FILE_PATH,
         savingsFile: savingsMarkdown,
       }
     }))

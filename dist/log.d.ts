@@ -7,4 +7,9 @@
  * 避免长期运行把磁盘写满；轮转失败不影响主链路。
  */
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+/**
+ * 真实的 debug.log 路径。宿主进程的 cwd 不一定是工作区（桌面端是 profile 根目录），
+ * 所以必须把这个路径暴露出去，否则审计的人会去看工作区里那份只有测试噪音的日志。
+ */
+export declare const LOG_FILE_PATH: string;
 export declare function logEvent(level: LogLevel, event: string, detail?: Record<string, unknown>): void;

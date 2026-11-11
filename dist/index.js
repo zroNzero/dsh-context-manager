@@ -435,7 +435,7 @@ function apply(ctx, rawConfig = {}) {
         return fallback;
     };
     const workspaceFor = (session, agent) => (0, workspace_1.workspaceRefFromSession)(session, agent) ?? (0, workspace_1.workspaceRef)('(unknown)');
-    (0, log_1.logEvent)('info', 'apply.start', { plugin: exports.name, config });
+    (0, log_1.logEvent)('info', 'apply.start', { plugin: exports.name, debugLog: log_1.LOG_FILE_PATH, cwd: process.cwd(), config });
     (0, log_1.logEvent)('info', 'pricing.loaded', (0, pricing_1.pricingLoadedLog)((0, pricing_1.priceFor)('deepseek-flash')));
     try {
         const sectionDisposer = services.systemPrompt?.section?.({
@@ -492,6 +492,7 @@ function apply(ctx, rawConfig = {}) {
                     lastPricing: real.lastPricing,
                 },
                 realBillFile: realBillMarkdown,
+                debugLogFile: log_1.LOG_FILE_PATH,
                 savingsFile: savingsMarkdown,
             };
         }));
