@@ -31,6 +31,7 @@ import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { hasCrossFileDependency, RoutingModule } from './modules/routing'
 import { collectGarbage } from './modules/spill-gc'
 import { decideEffort, looksLikeError, syntheticMessages } from './modules/effort-policy'
+import { runCalibration, summarize } from './modules/calibrate'
 import { installSchemaCompressor } from './modules/schema-index'
 import { CompressionBreaker } from './modules/breaker'
 import { DedupBus, dedupeKey } from './modules/dedup-bus'
@@ -428,7 +429,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
    */
   const effortBaseline = (): { effort: unknown; source: string } => {
     try {
-      const selection: any = (services as any).agentDefaultModel?.currentSelection?.()
+      const selection: any = (services.get?.('agentDefaultModel') as any)?.currentSelection?.()
       const effort = selection?.reasoningEffort ?? selection?.controls?.reasoningEffort ?? selection?.config?.reasoningEffort
       if (effort) return { effort, source: 'agentDefaultModel' }
     } catch {
@@ -597,9 +598,37 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   const pendingTimers: Array<ReturnType<typeof setTimeout>> = []
   let schemaDisposer: (() => void) | null = null
 
+  /**
+   * 一次性测量仪器：状态目录里有 calibrate.flag 时，用未打补丁的原始 stream
+   * 对同一批 prompt 分别跑 max/high/low/off，量出真实的 output token 折算率。
+   * 跑完删掉 flag，失败只记日志，绝不影响宿主。
+   */
+  const maybeCalibrate = (rawStream: (options: any) => AsyncIterable<any>): void => {
+    const flag = path.resolve(process.cwd(), 'calibrate.flag')
+    try {
+      if (!fs.existsSync(flag)) return
+      fs.rmSync(flag, { force: true })
+    } catch {
+      return
+    }
+    void (async () => {
+      try {
+        const selection: any = (services.get?.('agentDefaultModel') as any)?.currentSelection?.()
+        const provider = String(selection?.provider ?? 'deepseek-account')
+        const model = String(selection?.model ?? 'deepseek-flash')
+        const samples = await runCalibration(rawStream, { provider, model, efforts: ['max', 'high', 'low', 'off'], maxTokens: 4000 })
+        logEvent('info', 'calibration.result', { module: 'Calibration', provider, model, samples, summary: summarize(samples) })
+      } catch (error) {
+        logEvent('warn', 'calibration.failed', { module: 'Calibration', error: String(error) })
+      }
+    })()
+  }
+
   const installSchema = (llm: any, source: string): boolean => {
     if (schemaDisposer !== null) return true
     if (!llm || typeof llm.stream !== 'function') return false
+    // 打补丁前先抓住原始 stream，供校准使用（必须绕过本插件，才量得到真实模型行为）。
+    const rawStream = llm.stream.bind(llm)
     const dispose = installSchemaCompressor({ llm, get: () => undefined } as any, {
       enabled: true,
       maxDescriptionChars: 120,
@@ -747,6 +776,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     schemaDisposer = dispose
     disposers.push(dispose)
     logEvent('info', 'schema.installed', { source })
+    maybeCalibrate(rawStream)
     return true
   }
 

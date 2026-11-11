@@ -59,6 +59,7 @@ const memory_1 = require("./modules/memory");
 const routing_1 = require("./modules/routing");
 const spill_gc_1 = require("./modules/spill-gc");
 const effort_policy_1 = require("./modules/effort-policy");
+const calibrate_1 = require("./modules/calibrate");
 const schema_index_1 = require("./modules/schema-index");
 const breaker_1 = require("./modules/breaker");
 const dedup_bus_1 = require("./modules/dedup-bus");
@@ -443,7 +444,7 @@ function apply(ctx, rawConfig = {}) {
      */
     const effortBaseline = () => {
         try {
-            const selection = services.agentDefaultModel?.currentSelection?.();
+            const selection = services.get?.('agentDefaultModel')?.currentSelection?.();
             const effort = selection?.reasoningEffort ?? selection?.controls?.reasoningEffort ?? selection?.config?.reasoningEffort;
             if (effort)
                 return { effort, source: 'agentDefaultModel' };
@@ -617,11 +618,41 @@ function apply(ctx, rawConfig = {}) {
     // 因此既在根 ctx 上重试，也在首条 pre-step 的 payload.agent.loopCtx.llm 上补装。
     const pendingTimers = [];
     let schemaDisposer = null;
+    /**
+     * 一次性测量仪器：状态目录里有 calibrate.flag 时，用未打补丁的原始 stream
+     * 对同一批 prompt 分别跑 max/high/low/off，量出真实的 output token 折算率。
+     * 跑完删掉 flag，失败只记日志，绝不影响宿主。
+     */
+    const maybeCalibrate = (rawStream) => {
+        const flag = path.resolve(process.cwd(), 'calibrate.flag');
+        try {
+            if (!fs.existsSync(flag))
+                return;
+            fs.rmSync(flag, { force: true });
+        }
+        catch {
+            return;
+        }
+        void (async () => {
+            try {
+                const selection = services.get?.('agentDefaultModel')?.currentSelection?.();
+                const provider = String(selection?.provider ?? 'deepseek-account');
+                const model = String(selection?.model ?? 'deepseek-flash');
+                const samples = await (0, calibrate_1.runCalibration)(rawStream, { provider, model, efforts: ['max', 'high', 'low', 'off'], maxTokens: 4000 });
+                (0, log_1.logEvent)('info', 'calibration.result', { module: 'Calibration', provider, model, samples, summary: (0, calibrate_1.summarize)(samples) });
+            }
+            catch (error) {
+                (0, log_1.logEvent)('warn', 'calibration.failed', { module: 'Calibration', error: String(error) });
+            }
+        })();
+    };
     const installSchema = (llm, source) => {
         if (schemaDisposer !== null)
             return true;
         if (!llm || typeof llm.stream !== 'function')
             return false;
+        // 打补丁前先抓住原始 stream，供校准使用（必须绕过本插件，才量得到真实模型行为）。
+        const rawStream = llm.stream.bind(llm);
         const dispose = (0, schema_index_1.installSchemaCompressor)({ llm, get: () => undefined }, {
             enabled: true,
             maxDescriptionChars: 120,
@@ -765,6 +796,7 @@ function apply(ctx, rawConfig = {}) {
         schemaDisposer = dispose;
         disposers.push(dispose);
         (0, log_1.logEvent)('info', 'schema.installed', { source });
+        maybeCalibrate(rawStream);
         return true;
     };
     const resolveRootLlm = () => {

@@ -795,7 +795,8 @@ async function main(): Promise<void> {
       systemPrompt: { section: () => () => {} },
       tools: { register: () => () => {} },
       on: () => () => {},
-      agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm', reasoningEffort: 'low' }) },
+      // 未在 inject 里的服务必须走 ctx.get()，不用属性访问
+      get: (name: string) => (name === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'p', model: 'm', reasoningEffort: 'low' }) } : undefined),
     }
     ctxU.llm = {
       stream(request: any) {

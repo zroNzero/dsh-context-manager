@@ -48,7 +48,13 @@ class ResponseCache {
         this.semanticReuse = options.semanticReuse ?? options.similarityThreshold !== undefined;
     }
     keyFor(request) {
-        const raw = `${request?.model ?? ''}::${request?.provider ?? ''}::${(0, history_rewriter_1.messagesCacheKey)(request?.messages, request?.tools)}`;
+        // 采样参数必须进 key：同一个 prompt 用不同 reasoningEffort / maxTokens / temperature
+        // 会得到不同的回答。原来的 key 只看 model::provider::messages，导致
+        // ① 切了 effort 还在重放旧答案（调参完全无效），
+        // ② 调小 maxTokens 也可能重放一段更长的缓存回答。
+        // 实测踩到：配对校准里 max/high/low/off 四档拿到完全相同的结果，耗时 3ms（缓存命中）。
+        const controls = `${request?.reasoningEffort ?? ''}::${request?.maxTokens ?? ''}::${request?.temperature ?? ''}::${request?.stop ?? ''}`;
+        const raw = `${request?.model ?? ''}::${request?.provider ?? ''}::${controls}::${(0, history_rewriter_1.messagesCacheKey)(request?.messages, request?.tools)}`;
         return (0, node_crypto_1.createHash)('sha256').update(raw).digest('hex');
     }
     get(key) {
