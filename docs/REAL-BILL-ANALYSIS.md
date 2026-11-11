@@ -262,7 +262,46 @@ high 才是 "the default balance for most tasks"）。
 
 ---
 
-## 10. 复现
+## 10. 宿主契约：prepared call 的配置在 dispatch 前不可变（2026-11-11 事故）
+
+第一次上线动态 effort 时整轮全部失败，宿主报：
+
+```
+INVALID_PREPARED_CALL: prepared LLM call config changed before adapter dispatch
+```
+
+原因是 DSH 的 `prepareCall` 会**冻结** `LlmCallConfig`（provider / model /
+reasoningEffort / temperature / maxTokens / stop），dispatch 前严格比较；
+而我们在 `llm.stream` 阶段才改 `reasoningEffort`，两边必然不一致。
+折叠只改 messages/tools，不在比较字段里，所以不是它。
+
+正确做法是宿主自己的 `ConfigureCall` 钩子（`prepareCall(config, signal, configure)`
+的第三个参数）：它返回的 controls 会被冻结成最终配置，dispatch 时自然一致。
+本插件的实现：
+
+- `configureControls` 与宿主传入的 configure **组合**（宿主先选，我们再只下调）；
+- `llm.stream` 直连路径仍然改 options（那里不存在 prepared 配置）；
+- 保活**不能**复用 `prepared.stream`：它是单次可派发句柄，第二次派发会抛
+  `LlmError: a prepared LLM call can only be dispatched once`（实盘踩到过）。
+  保活改为通过宿主原始的 `llm.stream` 自己开一次 `maxTokens=1` 的调用；
+- 保活加了每会话两次失败的熔断，避免宿主行为变化后持续烧钱。
+
+回归测试 `prepared path: effort frozen before dispatch, keepalive opens its own call`
+用假宿主复刻了这条校验：故意传不一致的 effort 必须被拒绝，否则断言本身无意义。
+
+### 早期实测（样本小，非受控）
+
+| 窗口 | 请求数 | 平均 output | p50 | p90 |
+|---|---:|---:|---:|---:|
+| 策略生效前（全程 max） | 392 | 615 | 296 | 1668 |
+| 策略生效后 | 64 | 508 | 328 | 1228 |
+
+长尾缩短明显（p90 −26%），均值 −17%，中位数基本持平——符合「省掉的是过度思考，
+不是正常作答」的预期。样本量小且任务构成不同，**还不能当作结论**。
+
+---
+
+## 11. 复现
 
 ```powershell
 cd D:\PC\dsh\dsh-context-manager
