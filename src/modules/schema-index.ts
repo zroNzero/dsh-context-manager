@@ -22,6 +22,7 @@ import { replayChunks, type ResponseCache } from './response-cache'
 import { selectTools, selectToolsScout, selectionFromNames, withCatalog, SEARCH_TOOLS_DEF, firstSentence, type ToolLike, type ToolSelection } from './tool-attention'
 import { planBudget, type ScopeBudget } from './scope'
 import { sealState, intentBucket } from './osiris'
+import { guardedStream } from './output-guard'
 
 export interface SchemaStats {
   changed: number
@@ -179,6 +180,9 @@ export interface SchemaCompressorOptions {
   toolAttention?: { enabled?: boolean; topK?: number }
   /** 把完整工具表回传给宿主，供 search_tools 元工具查询。 */
   onToolCatalog?: (tools: ToolLike[]) => void
+  /** 输出端硬截断（v2.0）：超过 maxTokens 或 JSON/代码块闭合后立即停止。 */
+  outputGuard?: { enabled?: boolean; maxTokens: number }
+  onOutputTruncated?: (reason: 'max_tokens' | 'json_closed' | 'code_closed') => void
 }
 
 /** 粗略估算消息侧 token（4 字符/token），用于面板比例的分母。 */
@@ -430,7 +434,14 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
       options.onSemanticHit?.(similar.score)
       return replayChunks(similar.chunks)
     }
-    const stream = invoke(optimized)
+    const source = invoke(optimized)
+    const stream = options.outputGuard
+      ? guardedStream(source, {
+          maxTokens: options.outputGuard.maxTokens,
+          enabled: options.outputGuard.enabled,
+          onTruncate: options.onOutputTruncated,
+        })
+      : source
     return (async function* () {
       const chunks: any[] = []
       for await (const chunk of stream) {

@@ -33,6 +33,9 @@ export interface CacheAnchorInput {
     expectedRemainingTurns?: number;
     /** 当前上下文 token 数，用于大块折叠（chunking）判定。 */
     contextTokens?: number;
+    /** 真实缓存单价（由 PRICING_TABLE 注入；缺省用 1/30 的保守值）。 */
+    hitPrice?: number;
+    missPrice?: number;
     patch: Patch;
 }
 export type CacheReason = 'NET_POSITIVE' | 'NON_POSITIVE' | 'PREFIX_BREAK_OUTWEIGHED' | 'PREFIX_BREAK_ACCEPTED';

@@ -31,6 +31,8 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     rewriteAssistantChars: z.ZodDefault<z.ZodNumber>;
     responseCacheEnabled: z.ZodDefault<z.ZodBoolean>;
     responseCacheTtlMs: z.ZodDefault<z.ZodNumber>;
+    outputGuardEnabled: z.ZodDefault<z.ZodBoolean>;
+    outputMaxTokens: z.ZodDefault<z.ZodNumber>;
     semanticCacheThreshold: z.ZodDefault<z.ZodNumber>;
     toolAttentionEnabled: z.ZodDefault<z.ZodBoolean>;
     toolAttentionTopK: z.ZodDefault<z.ZodNumber>;

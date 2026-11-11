@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — 真实计费与输出端杠杆
+
+- **PRICING_TABLE**：内置 DeepSeek 官方人民币单价（flash / v4-pro，高峰/空闲），
+  北京时间高峰判定（周一至周五 9–12、14–18）；`pricing.loaded` 写入日志。
+- **CacheAnchor 真实冷读罚金**：`cachedPrefixTokens × (missPrice − hitPrice)`，
+  价格来自 PRICING_TABLE，不再使用固定 1/30。
+- **输出端硬截断**：`outputMaxTokens=1500`，JSON 闭合或代码块闭合立即 STOP，
+  日志 `output.truncated`（reason = json_closed / code_closed / max_tokens）。
+- **本地路由默认开启**：500ms 探测 127.0.0.1:11434；不可达写
+  `routing.local_unavailable`（不阻塞）；可达且 <3000 tokens 走本地，失败写
+  `routing.local_degraded` 并回退云端。
+
 ## v1.0.0-prod — 2026-11-11
 
 ### 三大杠杆 + 防降智护栏

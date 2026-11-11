@@ -38,6 +38,7 @@ import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modu
 import { rewriteMessages } from './modules/history-rewriter'
 import { ResponseCache } from './modules/response-cache'
 import { ToolPipe } from './modules/tool-pipe'
+import { priceFor, pricingLoadedLog } from './modules/pricing'
 
 export const name = 'dsh-context-manager'
 export const inject = ['systemPrompt', 'tools', 'sessions', 'agents']
@@ -69,6 +70,9 @@ export const Config = z.object({
   /** 精确哈希响应缓存（v1.2）：同一请求 5 分钟内直接重放。 */
   responseCacheEnabled: z.boolean().default(true),
   responseCacheTtlMs: z.number().int().positive().default(300_000),
+  /** 输出端硬截断（v2.0）。 */
+  outputGuardEnabled: z.boolean().default(true),
+  outputMaxTokens: z.number().int().positive().default(1500),
   /** 语义缓存 Jaccard 阈值（v1.3）。 */
   semanticCacheThreshold: z.number().min(0.5).max(1).default(0.85),
   /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
@@ -77,7 +81,7 @@ export const Config = z.object({
   /** 本地 LLM 端点（v1.3 快速探测）。 */
   localBaseUrl: z.string().default('http://127.0.0.1:11434'),
   /** 是否真正发起本地路由请求（决策与日志始终开启）。 */
-  localRouting: z.boolean().default(false),
+  localRouting: z.boolean().default(true),
   /** spill 目录保留的最大文件数。 */
   spillMaxFiles: z.number().int().positive().default(50),
   /** spill 文件 TTL（小时）。 */
@@ -376,6 +380,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     workspaceRefFromSession(session, agent) ?? workspaceRef('(unknown)')
 
   logEvent('info', 'apply.start', { plugin: name, config })
+  logEvent('info', 'pricing.loaded', pricingLoadedLog(priceFor('deepseek-flash')))
 
   try {
     const sectionDisposer = services.systemPrompt?.section?.({
@@ -512,6 +517,9 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       responseCache: config.responseCacheEnabled ? responseCache : undefined,
       onCacheHit: () => logEvent('info', 'cache.response_hit', responseCache.stats()),
       onSemanticHit: (score: number) => logEvent('info', 'cache.semantic_hit', { score, ...responseCache.stats() }),
+      outputGuard: { enabled: config.outputGuardEnabled, maxTokens: config.outputMaxTokens },
+      onOutputTruncated: (reason: string) =>
+        logEvent('info', 'output.truncated', { module: 'OutputGuard', reason, maxTokens: config.outputMaxTokens }),
       toolAttention: { enabled: config.toolAttentionEnabled, topK: config.toolAttentionTopK },
       onToolCatalog: (tools) => {
         toolSchemas.clear()
@@ -836,7 +844,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
           tokensBefore: tokens,
         })
       }
-      if (config.localRouting && routingDecision.route === 'local') {
+      if (config.localRouting && localAvailable && routingDecision.route === 'local' && routingTokens < 3000) {
         const routed = await router.attemptLocal(lastUser?.text ?? '')
         logEvent('info', 'routing.result', {
           module: 'Routing',
@@ -846,6 +854,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         })
         if (routed.route === 'local') {
           logEvent('info', 'routing.local_hit', { module: 'Routing', latencyMs: routed.latencyMs })
+        } else {
+          logEvent('info', 'routing.local_degraded', { module: 'Routing', reason: routed.reason })
         }
       }
 
@@ -869,6 +879,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
       // 寿命摊销：按“会话总回合预估 − 当前回合”估算剩余回合，供 CacheAnchor 折算。
       const remainingTurns = Math.max(0, Math.floor(config.assumedTurns - Number(payload?.turn ?? 0)))
+      const price = priceFor(String(payload?.agent?.model ?? 'deepseek-flash'))
+      const missRatio = price.hit > 0 ? price.miss / price.hit : 30
       const decision = gatePatch({
         prefixBreak,
         cachedPrefixTokens,
@@ -877,6 +889,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         recallPenalty: 0,
         expectedRemainingTurns: remainingTurns,
         contextTokens: tokens,
+        hitPrice: 1,
+        missPrice: missRatio,
         patch: plan.patch,
       })
 
@@ -891,6 +905,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         patchId: decision.patchId,
         savedTokens: plan.tokensSaved,
         remainingTurns,
+        pricing: { tier: price.tier, peak: price.peak, hit: price.hit, miss: price.miss, output: price.output },
       })
 
       if (!decision.approved) {

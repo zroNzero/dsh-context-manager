@@ -26,6 +26,7 @@ const response_cache_1 = require("./response-cache");
 const tool_attention_1 = require("./tool-attention");
 const scope_1 = require("./scope");
 const osiris_1 = require("./osiris");
+const output_guard_1 = require("./output-guard");
 function truncateText(value, maxChars) {
     const points = Array.from(value);
     if (points.length <= maxChars)
@@ -378,7 +379,14 @@ function installSchemaCompressor(ctx, options = {}) {
             options.onSemanticHit?.(similar.score);
             return (0, response_cache_1.replayChunks)(similar.chunks);
         }
-        const stream = invoke(optimized);
+        const source = invoke(optimized);
+        const stream = options.outputGuard
+            ? (0, output_guard_1.guardedStream)(source, {
+                maxTokens: options.outputGuard.maxTokens,
+                enabled: options.outputGuard.enabled,
+                onTruncate: options.onOutputTruncated,
+            })
+            : source;
         return (async function* () {
             const chunks = [];
             for await (const chunk of stream) {

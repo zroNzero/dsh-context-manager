@@ -66,6 +66,7 @@ const workspace_1 = require("./modules/workspace");
 const history_rewriter_1 = require("./modules/history-rewriter");
 const response_cache_1 = require("./modules/response-cache");
 const tool_pipe_1 = require("./modules/tool-pipe");
+const pricing_1 = require("./modules/pricing");
 exports.name = 'dsh-context-manager';
 exports.inject = ['systemPrompt', 'tools', 'sessions', 'agents'];
 exports.Config = zod_1.z.object({
@@ -95,6 +96,9 @@ exports.Config = zod_1.z.object({
     /** 精确哈希响应缓存（v1.2）：同一请求 5 分钟内直接重放。 */
     responseCacheEnabled: zod_1.z.boolean().default(true),
     responseCacheTtlMs: zod_1.z.number().int().positive().default(300_000),
+    /** 输出端硬截断（v2.0）。 */
+    outputGuardEnabled: zod_1.z.boolean().default(true),
+    outputMaxTokens: zod_1.z.number().int().positive().default(1500),
     /** 语义缓存 Jaccard 阈值（v1.3）。 */
     semanticCacheThreshold: zod_1.z.number().min(0.5).max(1).default(0.85),
     /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
@@ -103,7 +107,7 @@ exports.Config = zod_1.z.object({
     /** 本地 LLM 端点（v1.3 快速探测）。 */
     localBaseUrl: zod_1.z.string().default('http://127.0.0.1:11434'),
     /** 是否真正发起本地路由请求（决策与日志始终开启）。 */
-    localRouting: zod_1.z.boolean().default(false),
+    localRouting: zod_1.z.boolean().default(true),
     /** spill 目录保留的最大文件数。 */
     spillMaxFiles: zod_1.z.number().int().positive().default(50),
     /** spill 文件 TTL（小时）。 */
@@ -393,6 +397,7 @@ function apply(ctx, rawConfig = {}) {
     };
     const workspaceFor = (session, agent) => (0, workspace_1.workspaceRefFromSession)(session, agent) ?? (0, workspace_1.workspaceRef)('(unknown)');
     (0, log_1.logEvent)('info', 'apply.start', { plugin: exports.name, config });
+    (0, log_1.logEvent)('info', 'pricing.loaded', (0, pricing_1.pricingLoadedLog)((0, pricing_1.priceFor)('deepseek-flash')));
     try {
         const sectionDisposer = services.systemPrompt?.section?.({
             name: 'cost-killer:policy',
@@ -531,6 +536,8 @@ function apply(ctx, rawConfig = {}) {
             responseCache: config.responseCacheEnabled ? responseCache : undefined,
             onCacheHit: () => (0, log_1.logEvent)('info', 'cache.response_hit', responseCache.stats()),
             onSemanticHit: (score) => (0, log_1.logEvent)('info', 'cache.semantic_hit', { score, ...responseCache.stats() }),
+            outputGuard: { enabled: config.outputGuardEnabled, maxTokens: config.outputMaxTokens },
+            onOutputTruncated: (reason) => (0, log_1.logEvent)('info', 'output.truncated', { module: 'OutputGuard', reason, maxTokens: config.outputMaxTokens }),
             toolAttention: { enabled: config.toolAttentionEnabled, topK: config.toolAttentionTopK },
             onToolCatalog: (tools) => {
                 toolSchemas.clear();
@@ -839,7 +846,7 @@ function apply(ctx, rawConfig = {}) {
                     tokensBefore: tokens,
                 });
             }
-            if (config.localRouting && routingDecision.route === 'local') {
+            if (config.localRouting && localAvailable && routingDecision.route === 'local' && routingTokens < 3000) {
                 const routed = await router.attemptLocal(lastUser?.text ?? '');
                 (0, log_1.logEvent)('info', 'routing.result', {
                     module: 'Routing',
@@ -849,6 +856,9 @@ function apply(ctx, rawConfig = {}) {
                 });
                 if (routed.route === 'local') {
                     (0, log_1.logEvent)('info', 'routing.local_hit', { module: 'Routing', latencyMs: routed.latencyMs });
+                }
+                else {
+                    (0, log_1.logEvent)('info', 'routing.local_degraded', { module: 'Routing', reason: routed.reason });
                 }
             }
             if (!plan.patch)
@@ -869,6 +879,8 @@ function apply(ctx, rawConfig = {}) {
             });
             // 寿命摊销：按“会话总回合预估 − 当前回合”估算剩余回合，供 CacheAnchor 折算。
             const remainingTurns = Math.max(0, Math.floor(config.assumedTurns - Number(payload?.turn ?? 0)));
+            const price = (0, pricing_1.priceFor)(String(payload?.agent?.model ?? 'deepseek-flash'));
+            const missRatio = price.hit > 0 ? price.miss / price.hit : 30;
             const decision = (0, cacheAnchor_1.gatePatch)({
                 prefixBreak,
                 cachedPrefixTokens,
@@ -877,6 +889,8 @@ function apply(ctx, rawConfig = {}) {
                 recallPenalty: 0,
                 expectedRemainingTurns: remainingTurns,
                 contextTokens: tokens,
+                hitPrice: 1,
+                missPrice: missRatio,
                 patch: plan.patch,
             });
             (0, log_1.logEvent)('info', 'cache.decision', {
@@ -890,6 +904,7 @@ function apply(ctx, rawConfig = {}) {
                 patchId: decision.patchId,
                 savedTokens: plan.tokensSaved,
                 remainingTurns,
+                pricing: { tier: price.tier, peak: price.peak, hit: price.hit, miss: price.miss, output: price.output },
             });
             if (!decision.approved) {
                 counters.rejectedByAnchor += 1;

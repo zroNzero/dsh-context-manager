@@ -18,9 +18,9 @@ export const CACHE_ECON = {
 
 export function evaluateCacheAnchor(input: CacheAnchorInput): CacheDecision {
   const remainingTurns = Math.max(0, Math.floor(input.expectedRemainingTurns ?? 0))
-  const coldReadPenalty = input.prefixBreak
-    ? input.cachedPrefixTokens * (CACHE_ECON.missPrice - CACHE_ECON.hitPrice)
-    : 0
+  const hitPrice = input.hitPrice ?? CACHE_ECON.hitPrice
+  const missPrice = input.missPrice ?? CACHE_ECON.missPrice
+  const coldReadPenalty = input.prefixBreak ? input.cachedPrefixTokens * (missPrice - hitPrice) : 0
   // 寿命摊销：一次折叠会在后续每个回合持续省 token，按「剩余回合」累计。
   const lifetimeCompression = input.savedByCompression * (1 + remainingTurns)
   const netBenefit = lifetimeCompression + input.savedBySchema - coldReadPenalty - input.recallPenalty

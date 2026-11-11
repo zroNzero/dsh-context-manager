@@ -83,6 +83,12 @@ export interface SchemaCompressorOptions {
     };
     /** 把完整工具表回传给宿主，供 search_tools 元工具查询。 */
     onToolCatalog?: (tools: ToolLike[]) => void;
+    /** 输出端硬截断（v2.0）：超过 maxTokens 或 JSON/代码块闭合后立即停止。 */
+    outputGuard?: {
+        enabled?: boolean;
+        maxTokens: number;
+    };
+    onOutputTruncated?: (reason: 'max_tokens' | 'json_closed' | 'code_closed') => void;
 }
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。

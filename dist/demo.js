@@ -30,6 +30,8 @@ const scope_1 = require("./modules/scope");
 const osiris_1 = require("./modules/osiris");
 const tool_attention_2 = require("./modules/tool-attention");
 const tool_pipe_1 = require("./modules/tool-pipe");
+const pricing_1 = require("./modules/pricing");
+const output_guard_1 = require("./modules/output-guard");
 const write = (line) => {
     process.stdout.write(`${line}\n`);
 };
@@ -349,6 +351,22 @@ async function main() {
         foldedRuns: shapeSummary.foldedRuns,
         errorKept: shapeSummary.text.includes('NullPointerException'),
     });
+    const flashPrice = (0, pricing_1.priceFor)('deepseek-flash');
+    (0, log_1.logEvent)('info', 'pricing.loaded', (0, pricing_1.pricingLoadedLog)(flashPrice));
+    let truncateReason = '';
+    const fakeOutput = (async function* () {
+        yield { type: 'text', text: '{"ok":true}' };
+        yield { type: 'text', text: ' trailing nonsense that should be stopped' };
+    })();
+    for await (const _chunk of (0, output_guard_1.guardedStream)(fakeOutput, {
+        maxTokens: 1500,
+        onTruncate: (reason) => {
+            truncateReason = reason;
+        },
+    })) {
+        /* consume */
+    }
+    (0, log_1.logEvent)('info', 'output.truncated', { module: 'OutputGuard', reason: truncateReason || 'none' });
     dispose();
     const toonRows = Array.from({ length: 120 }, (_, index) => ({
         id: index,
@@ -410,6 +428,8 @@ async function main() {
     write(`[16] toolpipe: ref=${pipePublished.ref} bytes=${pipePublished.bytes} read=${pipeRead.ok}`);
     write(`[17] ast deep: mode=${astSummary.mode} deps=${astSummary.text.includes('[AST_DEP]') ? 'yes' : 'no'} tokens ${(0, contracts_1.estimateTokens)(astSample)} -> ${astSummary.tokensAfter}`);
     write(`[18] shape: protected=${shapeSummary.protectedLines} lines errorKept=${shapeSummary.text.includes('NullPointerException')}`);
+    write(`[19] pricing: ${flashPrice.peak ? 'peak' : 'offpeak'} flash hit=${flashPrice.hit} miss=${flashPrice.miss} output=${flashPrice.output} CNY/M`);
+    write(`[20] output guard: truncated=${truncateReason || 'none'}`);
     (0, log_1.logEvent)('info', 'demo.summary', {
         pipelineSaved: pipelineBefore - pipelineAfter,
         pipelineMs,
