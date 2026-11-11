@@ -90,7 +90,17 @@ exports.Config = zod_1.z.object({
     /** 会话总回合数预估，用于 CacheAnchor 的寿命摊销（默认 40：约 2× 冷读回本线）。 */
     assumedTurns: zod_1.z.number().int().positive().default(40),
     /** 请求级历史重写（v1.2）：只改 messages 内容，不动 session surface。 */
-    rewriteEnabled: zod_1.z.boolean().default(true),
+    /**
+     * 历史重写（有损）默认关闭 —— 真实账单决定的，不是口味问题。
+     *
+     * provider 缓存是前缀匹配：命中 ¥0.02/M、未命中 ¥1/M（差 50 倍）。重写把已经被
+     * 请求过的旧消息改成更短的文本，等于把那段前缀作废，它后面的整段都要按 miss 价
+     * 重算一次；而它换来的只是「后续每轮少读几千个 hit token」。实测：
+     *   - 有重写（预算随 token 数漂移）：轮内命中率 24.2%；
+     *   - 重写带来的省量按 hit 价折算，只有作废成本的十分之一量级。
+     * 而且截断旧工具输出本身就是信息损失。所以默认关；需要主动压缩的用户可以显式打开。
+     */
+    rewriteEnabled: zod_1.z.boolean().default(false),
     rewriteRetainRecent: zod_1.z.number().int().positive().default(8),
     rewriteToolChars: zod_1.z.number().int().positive().default(700),
     rewriteAssistantChars: zod_1.z.number().int().positive().default(400),
@@ -102,6 +112,8 @@ exports.Config = zod_1.z.object({
     outputMaxTokens: zod_1.z.number().int().positive().default(1500),
     /** 语义缓存 Jaccard 阈值（v1.3）。 */
     semanticCacheThreshold: zod_1.z.number().min(0.5).max(1).default(0.85),
+    /** 相似度语义复用（默认关）：会让「同一句话的第二轮」直接重放上一轮回答。 */
+    semanticCacheEnabled: zod_1.z.boolean().default(false),
     /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
     toolAttentionEnabled: zod_1.z.boolean().default(true),
     toolAttentionTopK: zod_1.z.number().int().positive().default(5),
@@ -323,7 +335,12 @@ function apply(ctx, rawConfig = {}) {
     const dedup = new dedup_bus_1.DedupBus(256);
     const ledger = new savings_ledger_1.SavingsLedger();
     const billing = new billing_1.BillingLedger();
-    const responseCache = new response_cache_1.ResponseCache({ ttlMs: config.responseCacheTtlMs, similarityThreshold: config.semanticCacheThreshold });
+    const responseCache = new response_cache_1.ResponseCache({
+        ttlMs: config.responseCacheTtlMs,
+        // 默认关闭语义复用（不降智）：见 ResponseCache.findSimilar 的说明。
+        semanticReuse: config.semanticCacheEnabled,
+        similarityThreshold: config.semanticCacheThreshold,
+    });
     const toolPipe = new tool_pipe_1.ToolPipe(path.resolve(config.spillDir));
     const toolSchemas = new Map();
     let localAvailable = false;
@@ -551,10 +568,14 @@ function apply(ctx, rawConfig = {}) {
             enabled: true,
             maxDescriptionChars: 120,
             rewriteHistory: config.rewriteEnabled
-                ? (messages, budget) => (0, history_rewriter_1.rewriteMessages)(messages, {
-                    retainRecent: budget?.retainRecent ?? config.rewriteRetainRecent,
-                    assistantChars: budget?.assistantChars ?? config.rewriteAssistantChars,
-                    toolChars: budget?.toolChars ?? config.rewriteToolChars,
+                ? (messages) => 
+                // 固定预算（只取配置值）：重写结果必须是「消息内容」的纯函数。
+                // 一旦按实时 token 数漂移，旧消息每次被截成不同长度 -> 前缀失效 ->
+                // provider 缓存整段作废，按 miss 价重算（¥1/M vs ¥0.02/M）。
+                (0, history_rewriter_1.rewriteMessages)(messages, {
+                    retainRecent: config.rewriteRetainRecent,
+                    assistantChars: config.rewriteAssistantChars,
+                    toolChars: config.rewriteToolChars,
                 })
                 : undefined,
             responseCache: config.responseCacheEnabled ? responseCache : undefined,

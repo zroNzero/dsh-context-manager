@@ -451,7 +451,7 @@ async function main() {
                 return (async function* () { })();
             },
         };
-        const dispose5 = (0, index_1.apply)(ctx5, cfg);
+        const dispose5 = (0, index_1.apply)(ctx5, { ...cfg, rewriteEnabled: true });
         const messages = [{ role: 'user', content: [{ type: 'text', text: '需求' }] }];
         for (let index = 0; index < 10; index += 1) {
             messages.push({ role: 'assistant', content: [{ type: 'text', text: `<thought>secret plan</thought> 决定 ${index} ${'a'.repeat(600)}` }] });
@@ -473,6 +473,57 @@ async function main() {
         assert(nonSystem[2].toolCallId === 'call_0', 'tool pairing id must be preserved');
         assert(!JSON.stringify(nonSystem[1]).includes('<thought>'), 'CoT must be stripped');
         dispose5();
+    });
+    await check('cache: a sent prefix is never rewritten differently later', async () => {
+        // 真实账单分析的核心不变量：provider 缓存是前缀匹配，已发出的前缀只要变一个字符，
+        // 整段就按 miss 价重算（¥1/M vs ¥0.02/M）。所以同一段旧内容在后续请求里必须
+        // 得到逐字节相同的重写结果——哪怕总上下文已经涨了一倍。
+        const capture = [];
+        const ctx7 = { systemPrompt: { section: () => () => { } }, tools: { register: () => () => { } }, on: () => () => { } };
+        ctx7.llm = {
+            stream(request) {
+                capture.push(request);
+                return (async function* () { })();
+            },
+        };
+        const dispose7 = (0, index_1.apply)(ctx7, { ...cfg, rewriteEnabled: true, maxInputTokens: 100000 });
+        const seed = [{ role: 'user', content: [{ type: 'text', text: '需求' }] }];
+        for (let index = 0; index < 12; index += 1) {
+            seed.push({ role: 'assistant', content: [{ type: 'text', text: `<thought>x</thought> 决定 ${index} ${'a'.repeat(500)}` }] });
+            seed.push({ role: 'tool', toolCallId: `call_${index}`, content: [{ type: 'text', text: `line ${index} ${'b'.repeat(400)}` }] });
+        }
+        const tools = Array.from({ length: 6 }, (_, index) => ({
+            name: `t${index}`,
+            description: 'description '.repeat(20),
+            parameters: { type: 'object', properties: {} },
+        }));
+        // 第一次请求：上下文较小。
+        ctx7.llm.stream({ provider: 'p', model: 'm', messages: [...seed, { role: 'user', content: [{ type: 'text', text: '第一问' }] }], tools });
+        // 第二次请求：同样的历史 + 大量新增长内容（总 token 数显著变大）。
+        const fat = 'z'.repeat(40_000);
+        const grown = [...seed, { role: 'user', content: [{ type: 'text', text: '第一问' }] }, { role: 'assistant', content: [{ type: 'text', text: '答' }] }];
+        for (let index = 0; index < 4; index += 1) {
+            grown.push({ role: 'tool', toolCallId: `late_${index}`, content: [{ type: 'text', text: fat }] });
+        }
+        grown.push({ role: 'user', content: [{ type: 'text', text: '第二问' }] });
+        ctx7.llm.stream({ provider: 'p', model: 'm', messages: grown, tools });
+        assert(capture.length === 2, `expected 2 captured requests, got ${capture.length}`);
+        const strip = (request) => request.messages.filter((message) => message?.role !== 'system');
+        const first = strip(capture[0]);
+        const second = strip(capture[1]);
+        assert(first.length > 0, 'first request lost its messages');
+        // 已发出的前缀里，落在「重写窗口」之外的旧消息必须逐字节不变。
+        // 窗口内的最新若干条会随新消息进入而首次被重写，这是有损重写的固有代价（默认关闭）。
+        const stableCount = Math.max(0, first.length - 8);
+        assert(stableCount >= 10, `test setup too small to be meaningful: stableCount=${stableCount}`);
+        for (let index = 0; index < stableCount; index += 1) {
+            const a = JSON.stringify(first[index]);
+            const b = JSON.stringify(second[index]);
+            assert(a === b, `prefix message ${index} drifted between requests (cache would be invalidated)`);
+        }
+        // 重写确实在起作用，否则这个不变量是空的
+        assert(JSON.stringify(first).length < JSON.stringify(seed).length, 'rewrite did nothing, invariant is vacuous');
+        dispose7();
     });
     await check('response cache replays identical request', async () => {
         const ctx6 = { systemPrompt: { section: () => () => { } }, tools: { register: () => () => { } }, on: () => () => { } };

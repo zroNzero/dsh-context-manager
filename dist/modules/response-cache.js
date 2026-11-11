@@ -33,6 +33,7 @@ class ResponseCache {
     maxEntries;
     maxBytes;
     similarityThreshold;
+    semanticReuse;
     entries = new Map();
     totalBytes = 0;
     hits = 0;
@@ -43,6 +44,8 @@ class ResponseCache {
         this.maxEntries = Math.max(1, options.maxEntries ?? 32);
         this.maxBytes = Math.max(64_000, options.maxBytes ?? 8 * 1024 * 1024);
         this.similarityThreshold = Math.min(1, Math.max(0.5, options.similarityThreshold ?? 0.85));
+        // 显式给出相似度阈值才算「主动开启」语义复用；两者都没给时默认关闭。
+        this.semanticReuse = options.semanticReuse ?? options.similarityThreshold !== undefined;
     }
     keyFor(request) {
         const raw = `${request?.model ?? ''}::${request?.provider ?? ''}::${(0, history_rewriter_1.messagesCacheKey)(request?.messages, request?.tools)}`;
@@ -65,6 +68,11 @@ class ResponseCache {
     }
     /** 语义查找：Jaccard 相似度达到阈值即返回（阈值高，避免跨任务误命中）。 */
     findSimilar(text) {
+        // 语义复用默认关闭：它按「最后一条用户消息的 Jaccard 相似度」重放旧回答。
+        // 两轮说的是同一句话时（典型如连续两次「继续」）相似度=1，模型根本不会被调用，
+        // 用户拿到的是上一轮的回答 —— 这是降智，不是省钱。
+        if (!this.semanticReuse)
+            return undefined;
         const probe = tokenSet(text);
         if (probe.size === 0)
             return undefined;

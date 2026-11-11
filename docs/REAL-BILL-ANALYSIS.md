@@ -95,7 +95,34 @@ prompt 侧成本几乎全部来自 **miss（未命中缓存）**：
 
 ---
 
-## 5. 复现
+## 5. 据此做出的改动（2026-11-11）
+
+定位到的根因：**历史重写的压缩上限是按「当前实时 token 数」算出来的**。
+上下文每长一点，同一条旧消息就被截成另一个长度，于是已经发出去的前缀每次请求都变，
+provider 只能从头 miss 重算。实测轮内命中率 24.2%（轮内上下文只追加，本应接近 100%）。
+
+改了三处：
+
+| 改动 | 理由 |
+|---|---|
+| `rewriteEnabled` 默认 **false** | 截断旧内容省下的是 hit 价 token（¥0.02/M），作废前缀要按 miss 价（¥1/M）重算，净亏；且截断本身是信息损失 |
+| 重写预算**固定**（不再传实时 budget） | 即使显式开启，也保证「同一段内容永远重写成同一段文本」；`rewriteHistory` 回调签名已移除预算参数，防止回归 |
+| `semanticCacheEnabled` 默认 **false** | 相似度复用会在连续两次「继续」时让模型不被调用、重放上一轮回答，属降智 |
+
+验收口径相应改为：**在不降智的前提下尽可能降本**，真实降幅以
+`savings.json.realBill.reduction`（provider usage × 官方单价）为准，
+理论上限 44.2% 写死在 `docs/REAL-BILL-ANALYSIS.md` 里，不允许再出现 token 口径的「降幅」。
+
+### 下一步（按收益排序）
+
+1. **TTL Keepalive（武器 30）**：provider 缓存约 4 分钟过期，跨轮空闲后首个请求必然全 miss。
+   在过期前按 `hit` 价重放一次前缀，可把「用户思考几分钟后回来」这一整段 miss 变成 hit。
+   必须严格在 TTL 之前触发，否则 keepalive 自己就变成一次全价 miss。
+2. **重写关闭后的实测**：需要重启宿主让新 `dist` 生效，再对比 `realBill.reduction` 与命中率。
+
+---
+
+## 6. 复现
 
 ```powershell
 cd D:\PC\dsh\dsh-context-manager

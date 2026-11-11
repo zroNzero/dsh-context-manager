@@ -16,12 +16,15 @@ export interface ResponseCacheOptions {
     maxBytes?: number;
     /** Jaccard 阈值，默认 0.85。 */
     similarityThreshold?: number;
+    /** 是否允许相似度复用；未显式给出阈值时默认 false（不降智）。 */
+    semanticReuse?: boolean;
 }
 export declare class ResponseCache {
     private readonly ttlMs;
     private readonly maxEntries;
     private readonly maxBytes;
     private readonly similarityThreshold;
+    private readonly semanticReuse;
     private readonly entries;
     private totalBytes;
     private hits;

@@ -231,7 +231,7 @@ function installSchemaCompressor(ctx, options = {}) {
                 lastBudgetKey = budgetKey;
                 (0, log_1.logEvent)('info', 'scope.budget', { module: 'SCOPE', sessionId: sessionKey, ...budget });
             }
-            const rewrite = options.rewriteHistory?.(request.messages, budget) ?? null;
+            const rewrite = options.rewriteHistory?.(request.messages) ?? null;
             let messages = rewrite?.messages ?? request.messages;
             const rewriteSaved = rewrite?.saved ?? 0;
             const rewriteBeforeTokens = rewrite?.beforeTokens ?? rawMessagesTokens;

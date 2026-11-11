@@ -34,6 +34,7 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     outputGuardEnabled: z.ZodDefault<z.ZodBoolean>;
     outputMaxTokens: z.ZodDefault<z.ZodNumber>;
     semanticCacheThreshold: z.ZodDefault<z.ZodNumber>;
+    semanticCacheEnabled: z.ZodDefault<z.ZodBoolean>;
     toolAttentionEnabled: z.ZodDefault<z.ZodBoolean>;
     toolAttentionTopK: z.ZodDefault<z.ZodNumber>;
     localBaseUrl: z.ZodDefault<z.ZodString>;

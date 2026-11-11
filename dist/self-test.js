@@ -379,6 +379,20 @@ check('billing.real-usage-only', () => {
     });
     assert(ledger.snapshot().reduction === before, 'unverified output must not move the reduction');
 });
+// ---------------------------------------------------------------------------
+// 10) 语义复用必须默认关闭（不降智）：同一句话的第二轮不能重放上一轮回答
+// ---------------------------------------------------------------------------
+check('cache.semantic-replay-off-by-default', () => {
+    const guard = new response_cache_1.ResponseCache({ ttlMs: 60_000, semanticReuse: false });
+    const chunks = [{ type: 'text-delta', index: 0, text: '上一轮的回答' }];
+    guard.set('k1', chunks, 'deepseek-flash 继续  [tools]');
+    assert(guard.findSimilar('deepseek-flash 继续  [tools]') === undefined, 'disabled semantic cache must never match');
+    assert(guard.stats().semanticHits === 0, 'no semantic hit may be recorded while disabled');
+    // 打开时确实会命中，证明上面的「不命中」不是缓存本身坏了
+    const open = new response_cache_1.ResponseCache({ ttlMs: 60_000, similarityThreshold: 0.85 });
+    open.set('k1', chunks, 'deepseek-flash 继续  [tools]');
+    assert(open.findSimilar('deepseek-flash 继续  [tools]') !== undefined, 'enabled semantic cache should match');
+});
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {
     process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'} ${item.name} :: ${item.detail}\n`);

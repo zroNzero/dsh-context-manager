@@ -17,7 +17,6 @@
 import type { RewriteResult } from './history-rewriter';
 import { type ResponseCache } from './response-cache';
 import { type ToolLike } from './tool-attention';
-import { type ScopeBudget } from './scope';
 export interface SchemaStats {
     changed: number;
     charsBefore: number;
@@ -69,8 +68,16 @@ export interface SchemaCompressorOptions {
         rewriteBeforeTokens?: number;
         rewriteAfterTokens?: number;
     }) => void;
-    /** 请求级历史重写（v1.2）：只改 messages 内容，不删除/重排消息。 */
-    rewriteHistory?: (messages: any, budget?: ScopeBudget) => RewriteResult | null;
+    /**
+     * 请求级历史重写（v1.2）：只改 messages 内容，不删除/重排消息。
+     *
+     * 缓存不变量（2026-11-11 真实账单分析）：provider 的 prompt 缓存是**前缀匹配**，
+     * 已发出的前缀只要有一个字符变了，整段就以 miss 价重算（miss ¥1/M vs hit ¥0.02/M，
+     * 差 50 倍）。因此这个回调**故意不提供实时预算**：任何按当前 token 数算出来的
+     * 压缩上限都会让旧消息每次被截成不同的长度，轮内命中率实测因此掉到 24%。
+     * 重写必须只依赖「消息内容 + 固定配置」，同一段内容永远得到同一段输出。
+     */
+    rewriteHistory?: (messages: any) => RewriteResult | null;
     /** 精确哈希响应缓存（v1.2）：命中时直接重放 chunk。 */
     responseCache?: ResponseCache;
     onCacheHit?: () => void;

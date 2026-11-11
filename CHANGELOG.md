@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — 缓存安全与真实账单（2026-11-11）
+
+真实账单分析（`docs/REAL-BILL-ANALYSIS.md`）显示：prompt 缓存命中 ¥0.02/M、未命中 ¥1/M，
+相差 50 倍；因此任何改动「已经发出去的前缀」的压缩都是净亏。
+
+- **真实账本**：`src/modules/billing.ts` 只认 provider 的 `StreamChunk.usage`，
+  缺 usage 一律不入账（拒绝估算补齐）；`real-bill.md` / `savings.json.realBill` /
+  `costkiller_status` 均可查；反事实成本用本请求实测的「字符→token」系数换算。
+- **历史重写默认关闭**（`rewriteEnabled: false`）：它把已发出的旧消息截短，
+  作废整段缓存前缀（实测轮内命中率只剩 24.2%），换来的只是 hit 价 token 的节省。
+- **重写预算固定**：即使显式开启，也只依赖「消息内容 + 固定配置」，
+  不再按实时 token 数漂移；`rewriteHistory` 回调已不再暴露预算参数。
+- **语义复用默认关闭**（`semanticCacheEnabled: false`）：连续两次「继续」会让模型
+  不被调用、直接重放上一轮回答。
+- 测试：self-test 19/19、verify 23/23（新增缓存前缀不变量、真实 usage 账本用例）。
+
 ## Unreleased — 真实计费与输出端杠杆
 
 - **PRICING_TABLE**：内置 DeepSeek 官方人民币单价（flash / v4-pro，高峰/空闲），
