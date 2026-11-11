@@ -301,7 +301,46 @@ reasoningEffort / temperature / maxTokens / stop），dispatch 前严格比较�
 
 ---
 
-## 11. 复现
+## 11. 配对校准：reasoning effort 的真实折算率（2026-11-11 实测）
+
+先前所有 effort 相关的数字都只能是区间，因为缺一个东西：**同一 prompt 在不同档位下
+到底差多少 output token**。用一次性仪器补上了（`src/modules/calibrate.ts`，
+状态目录放 `calibrate.flag` 即在下一次 apply 后自动跑一次，跑完删 flag）。
+
+3 条 prompt（调试类 / 推理类 / 概念类）× 4 档，串行真实调用（延迟 1.3–5.6s，不是缓存）：
+
+| effort | 平均 output | 平均 reasoning 字符 | 相对 max |
+|---|---:|---:|---:|
+| max | **608** | 1808 | — |
+| high | **344** | 967 | **−43.4%** |
+| low | 357 | 851 | −41.3% |
+| off | 96 | 0 | −84.3% |
+
+**关键结论**：悬崖在 `max → high`（−43%），而 `high → low` 几乎不省钱（344 vs 357）。
+所以：
+
+1. profile 长期用 `max` 是纯浪费；
+2. 真正干活的步骤**不该**掉到 `low` —— 花一样的钱、少一半思考。执行步现在兜底在 `high`；
+3. 只有机械轮次（trivial/easy）才降到 `off`，那里才是真省（96 vs 608）。
+
+### 换算到账单
+
+- 真实流量 reasoning 占输出字符 **60.7%**；max→high 砍掉 reasoning **46.5%**
+  → 输出降 ≈ **28%**（tool-call 参数那 37.6% 不缩）。
+- 执行步承载 **93.4%** 的 reasoning → 全流量输出降 ≈ **26%**。
+- 输出占账单 41%–67% → **effort 杠杆 = 11%–18% 账单**。
+
+### 校准踩到的两个坑（都已修）
+
+1. **精确响应缓存的 key 不含采样参数**：四档拿到完全相同的 output、11/12 次耗时 1–4ms。
+   现在 `reasoningEffort / maxTokens / temperature / stop` 都进 key；校准 prompt 另加 nonce。
+2. **热重载会层层套娃**：宿主 in-place 重新应用不 dispose 旧实例（两次 reload 之间没有任何
+   `apply.dispose`），旧层缓存会先拦截新层调用。现在用 `globalThis` 单例先拆旧层再装，
+   disposer 幂等。
+
+---
+
+## 12. 复现
 
 ```powershell
 cd D:\PC\dsh\dsh-context-manager
