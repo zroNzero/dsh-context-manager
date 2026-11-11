@@ -18,6 +18,7 @@ import { ToolPipe } from './modules/tool-pipe'
 import { estimateTokens } from './contracts'
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
+import { stripStaleReasoning } from './modules/reasoning-drop'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
 import { SavingsLedger } from './modules/savings-ledger'
@@ -657,8 +658,46 @@ check('billing.effort-counterfactual', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 25) 前缀无损折叠：旧工具结果落盘 + 收据可读回，且必须字节确定（保证前缀缓存命中）
+// 26) 老 thinking 折叠：只动 reasoning/thinking，不动 text 与 tool-call，且结果确定
 // ---------------------------------------------------------------------------
+
+check('prefix.stale-reasoning-strip', () => {
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'go' }] },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'r'.repeat(500) },
+        { type: 'tool-call', id: 'c1', name: 'read', arguments: '{}' },
+      ],
+    },
+    { role: 'tool', content: [{ type: 'text', text: 'result' }] },
+    { role: 'assistant', content: [{ type: 'reasoning', text: 'tail' }, { type: 'text', text: 'done' }] },
+    { role: 'user', content: [{ type: 'text', text: 'next' }] },
+  ]
+  const first = stripStaleReasoning(messages, 2)
+  const second = stripStaleReasoning(messages, 2)
+
+  assert(first.stripped === 1, `only stale messages strip, got ${first.stripped}`)
+  assert(first.messages.length === messages.length, 'message count must not change')
+  assert(
+    first.messages[1].content.some((block: any) => block.type === 'tool-call'),
+    'tool-call must survive: dropping it breaks tool pairing',
+  )
+  assert(
+    !first.messages[1].content.some((block: any) => block.type === 'reasoning'),
+    'stale reasoning must be gone',
+  )
+  assert(
+    first.messages[3].content.some((block: any) => block.type === 'reasoning'),
+    'recent reasoning must stay',
+  )
+  assert(first.charsSaved === 500, `charsSaved must count the dropped reasoning, got ${first.charsSaved}`)
+  assert(
+    JSON.stringify(first.messages) === JSON.stringify(second.messages),
+    'strip must be deterministic or the prefix cache dies',
+  )
+})
 
 check('prefix.spill-lossless-and-deterministic', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ck-prefix-'))

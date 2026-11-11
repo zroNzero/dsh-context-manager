@@ -32,6 +32,11 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     prefixSpillEnabled: z.ZodDefault<z.ZodBoolean>;
     prefixSpillRetainRecent: z.ZodDefault<z.ZodNumber>;
     prefixSpillMinChars: z.ZodDefault<z.ZodNumber>;
+    dropStaleReasoning: z.ZodDefault<z.ZodEnum<{
+        off: "off";
+        auto: "auto";
+    }>>;
+    dropStaleReasoningRetainRecent: z.ZodDefault<z.ZodNumber>;
     responseCacheEnabled: z.ZodDefault<z.ZodBoolean>;
     responseCacheTtlMs: z.ZodDefault<z.ZodNumber>;
     outputGuardEnabled: z.ZodDefault<z.ZodBoolean>;

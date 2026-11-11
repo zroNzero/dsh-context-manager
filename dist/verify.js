@@ -22,6 +22,9 @@ const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const index_1 = require("./index");
 const contracts_1 = require("./contracts");
+// 契约探针会真的发一次请求；测试环境里没有真 provider，必须关掉，
+// 否则它会吃掉假 llm 的流、并让「捕获到的请求条数」这一类断言全部错位。
+process.env.CK_DISABLE_REASONING_PROBE = '1';
 const extraction_1 = require("./modules/extraction");
 const schema_index_1 = require("./modules/schema-index");
 const billing_1 = require("./modules/billing");

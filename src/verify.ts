@@ -18,6 +18,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { apply, Config, inject, name } from './index'
 import { estimateTokens } from './contracts'
+
+// 契约探针会真的发一次请求；测试环境里没有真 provider，必须关掉，
+// 否则它会吃掉假 llm 的流、并让「捕获到的请求条数」这一类断言全部错位。
+process.env.CK_DISABLE_REASONING_PROBE = '1'
 import { runExtraction, buildFirewallSummary } from './modules/extraction'
 import { installSchemaCompressor } from './modules/schema-index'
 import { BillingLedger } from './modules/billing'

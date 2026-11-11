@@ -22,6 +22,7 @@ const tool_pipe_1 = require("./modules/tool-pipe");
 const contracts_1 = require("./contracts");
 const history_rewriter_1 = require("./modules/history-rewriter");
 const prefix_spill_1 = require("./modules/prefix-spill");
+const reasoning_drop_1 = require("./modules/reasoning-drop");
 const memory_1 = require("./modules/memory");
 const host_sim_1 = require("./host-sim");
 const savings_ledger_1 = require("./modules/savings-ledger");
@@ -572,8 +573,32 @@ check('billing.effort-counterfactual', () => {
     assert(unknown.avoidedOutputTokens === 0, 'missing effort must not invent a counterfactual');
 });
 // ---------------------------------------------------------------------------
-// 25) 前缀无损折叠：旧工具结果落盘 + 收据可读回，且必须字节确定（保证前缀缓存命中）
+// 26) 老 thinking 折叠：只动 reasoning/thinking，不动 text 与 tool-call，且结果确定
 // ---------------------------------------------------------------------------
+check('prefix.stale-reasoning-strip', () => {
+    const messages = [
+        { role: 'user', content: [{ type: 'text', text: 'go' }] },
+        {
+            role: 'assistant',
+            content: [
+                { type: 'reasoning', text: 'r'.repeat(500) },
+                { type: 'tool-call', id: 'c1', name: 'read', arguments: '{}' },
+            ],
+        },
+        { role: 'tool', content: [{ type: 'text', text: 'result' }] },
+        { role: 'assistant', content: [{ type: 'reasoning', text: 'tail' }, { type: 'text', text: 'done' }] },
+        { role: 'user', content: [{ type: 'text', text: 'next' }] },
+    ];
+    const first = (0, reasoning_drop_1.stripStaleReasoning)(messages, 2);
+    const second = (0, reasoning_drop_1.stripStaleReasoning)(messages, 2);
+    assert(first.stripped === 1, `only stale messages strip, got ${first.stripped}`);
+    assert(first.messages.length === messages.length, 'message count must not change');
+    assert(first.messages[1].content.some((block) => block.type === 'tool-call'), 'tool-call must survive: dropping it breaks tool pairing');
+    assert(!first.messages[1].content.some((block) => block.type === 'reasoning'), 'stale reasoning must be gone');
+    assert(first.messages[3].content.some((block) => block.type === 'reasoning'), 'recent reasoning must stay');
+    assert(first.charsSaved === 500, `charsSaved must count the dropped reasoning, got ${first.charsSaved}`);
+    assert(JSON.stringify(first.messages) === JSON.stringify(second.messages), 'strip must be deterministic or the prefix cache dies');
+});
 check('prefix.spill-lossless-and-deterministic', () => {
     const dir = node_fs_1.default.mkdtempSync(node_path_1.default.join(node_os_1.default.tmpdir(), 'ck-prefix-'));
     const big = 'ERROR at line 42\n'.repeat(200);

@@ -68,6 +68,7 @@ const billing_1 = require("./modules/billing");
 const workspace_1 = require("./modules/workspace");
 const history_rewriter_1 = require("./modules/history-rewriter");
 const prefix_spill_1 = require("./modules/prefix-spill");
+const reasoning_drop_1 = require("./modules/reasoning-drop");
 const response_cache_1 = require("./modules/response-cache");
 const tool_pipe_1 = require("./modules/tool-pipe");
 const pricing_1 = require("./modules/pricing");
@@ -115,6 +116,13 @@ exports.Config = zod_1.z.object({
     prefixSpillEnabled: zod_1.z.boolean().default(true),
     prefixSpillRetainRecent: zod_1.z.number().int().nonnegative().default(6),
     prefixSpillMinChars: zod_1.z.number().int().positive().default(600),
+    /**
+     * 丢掉「最近 N 条之外」的历史 thinking（约占前缀 1/3）。
+     * auto：启动后先发两条一次性探针，只有对照组和删除组都成功才开启；denied/inconclusive
+     * 一律保持关闭——thinking 契约违反会直接打断会话，不能拿它赌。
+     */
+    dropStaleReasoning: zod_1.z.enum(['auto', 'off']).default('auto'),
+    dropStaleReasoningRetainRecent: zod_1.z.number().int().nonnegative().default(6),
     /** 精确哈希响应缓存（v1.2）：同一请求 5 分钟内直接重放。 */
     responseCacheEnabled: zod_1.z.boolean().default(true),
     responseCacheTtlMs: zod_1.z.number().int().positive().default(300_000),
@@ -515,6 +523,13 @@ function apply(ctx, rawConfig = {}) {
      */
     let lastEffort = null;
     /**
+     * 是否允许丢掉老 thinking。默认 false，只有启动探针拿到 'allowed' 才置 true。
+     * 见 modules/reasoning-drop.ts：违反 thinking 回传契约会直接打断会话。
+     */
+    let staleReasoningAllowed = false;
+    /** 探针每次进程只跑一次（重载插件不重复花钱）。 */
+    let staleReasoningProbed = false;
+    /**
      * 用户配置的 reasoning effort —— 只作为「不得超越」的上限。
      * 不能拿上游传进来的 reasoningEffort 当上限：宿主会把我们上一轮写进 config 的
      * 结果写回会话 header，下一轮再当 requested 传回来，于是形成单向棘轮（实测踩到）。
@@ -738,6 +753,29 @@ function apply(ctx, rawConfig = {}) {
             return false;
         // 打补丁前先抓住原始 stream，供校准使用（必须绕过本插件，才量得到真实模型行为）。
         const rawStream = llm.stream.bind(llm);
+        /**
+         * 一次性契约探针：只有在「保留 thinking 的对照组」和「删掉老 thinking 的实验组」
+         * 都成功时，才允许后续请求丢弃老 thinking。两条都是极短请求（maxTokens 8）。
+         * 失败一律按不允许处理 —— 省钱的收益远小于一次 `content[].thinking` 报错的代价。
+         */
+        if (config.dropStaleReasoning === 'auto' && !staleReasoningProbed && process.env.CK_DISABLE_REASONING_PROBE !== '1') {
+            staleReasoningProbed = true;
+            void (0, reasoning_drop_1.probeStaleReasoning)((request) => rawStream(request), {
+                provider: 'deepseek-account',
+                model: 'deepseek-flash',
+            })
+                .then((result) => {
+                staleReasoningAllowed = result.verdict === 'allowed';
+                (0, log_1.logEvent)('info', 'reasoning.probe', {
+                    module: 'ReasoningDrop',
+                    verdict: result.verdict,
+                    control: result.control,
+                    stripped: result.stripped,
+                    error: result.error ? result.error.slice(0, 200) : undefined,
+                });
+            })
+                .catch(() => undefined);
+        }
         const dispose = (0, schema_index_1.installSchemaCompressor)({ llm, get: () => undefined }, {
             enabled: true,
             maxDescriptionChars: 120,
@@ -755,24 +793,31 @@ function apply(ctx, rawConfig = {}) {
                         retainRecent: config.prefixSpillRetainRecent,
                         minChars: config.prefixSpillMinChars,
                     });
-                    if (!config.rewriteEnabled) {
-                        const before = (0, contracts_1.estimateTokens)(JSON.stringify(messages));
+                    const finish = (next) => {
+                        if (config.rewriteEnabled) {
+                            // 固定预算（只取配置值）：重写结果必须是「消息内容」的纯函数。
+                            return (0, history_rewriter_1.rewriteMessages)(next, {
+                                retainRecent: config.rewriteRetainRecent,
+                                assistantChars: config.rewriteAssistantChars,
+                                toolChars: config.rewriteToolChars,
+                            });
+                        }
                         return {
-                            messages: folded.messages,
-                            beforeTokens: before,
-                            afterTokens: (0, contracts_1.estimateTokens)(JSON.stringify(folded.messages)),
+                            messages: next,
+                            beforeTokens: (0, contracts_1.estimateTokens)(JSON.stringify(messages)),
+                            afterTokens: (0, contracts_1.estimateTokens)(JSON.stringify(next)),
                             saved: Math.max(0, folded.stats.charsBefore - folded.stats.charsAfter),
                             rewritten: folded.stats.folded,
                         };
-                    }
-                    // 固定预算（只取配置值）：重写结果必须是「消息内容」的纯函数。
-                    // 一旦按实时 token 数漂移，旧消息每次被截成不同长度 -> 前缀失效 ->
-                    // provider 缓存整段作废，按 miss 价重算（¥1/M vs ¥0.02/M）。
-                    return (0, history_rewriter_1.rewriteMessages)(folded.messages, {
-                        retainRecent: config.rewriteRetainRecent,
-                        assistantChars: config.rewriteAssistantChars,
-                        toolChars: config.rewriteToolChars,
-                    });
+                    };
+                    /**
+                     * 老 thinking 只在探针判定 allowed 之后才丢（默认 false，见 reasoning-drop.ts）：
+                     * 违反 thinking 回传契约会直接打断会话，不能拿它赌。
+                     */
+                    const next = staleReasoningAllowed
+                        ? (0, reasoning_drop_1.stripStaleReasoning)(folded.messages, config.dropStaleReasoningRetainRecent).messages
+                        : folded.messages;
+                    return finish(next);
                 }
                 : undefined,
             responseCache: config.responseCacheEnabled ? responseCache : undefined,
