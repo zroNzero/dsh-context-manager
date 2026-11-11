@@ -602,9 +602,10 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       onSemanticHit: (score: number) => logEvent('info', 'cache.semantic_hit', { score, ...responseCache.stats() }),
       outputGuard: { enabled: config.outputGuardEnabled, maxTokens: config.outputMaxTokens },
       resolveEffort: (request: any) => {
+        const requested = request?.reasoningEffort ?? request?.config?.reasoningEffort
         const decision = decideEffort({
           messages: request?.messages,
-          requested: request?.reasoningEffort,
+          requested,
           policy: {
             enabled: config.dynamicEffortEnabled,
             trivial: config.effortTrivial,
@@ -621,6 +622,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
           tier: decision.tier,
           from: decision.requested,
           to: decision.effort,
+          effortSource: requested === undefined ? 'assumed-max' : 'request',
           reason: decision.reason,
           escalated: decision.escalated,
         })

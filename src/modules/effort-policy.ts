@@ -151,7 +151,9 @@ export function decideEffort(input: {
   requested?: unknown
   policy: EffortPolicyConfig
 }): EffortDecision {
-  const requested = normalizeEffort(input.requested) ?? 'high'
+  // 无法读到宿主档位时按 max 处理：这是本 profile 的配置值，也是「可下调范围最大」的假设。
+  // 日志会记下 from 字段，实盘可核对这个假设是否成立。
+  const requested = normalizeEffort(input.requested) ?? 'max'
   const policy = input.policy
   const turn = classifyTurn(lastUserText(input.messages))
 

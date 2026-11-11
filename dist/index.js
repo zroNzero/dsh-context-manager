@@ -622,9 +622,10 @@ function apply(ctx, rawConfig = {}) {
             onSemanticHit: (score) => (0, log_1.logEvent)('info', 'cache.semantic_hit', { score, ...responseCache.stats() }),
             outputGuard: { enabled: config.outputGuardEnabled, maxTokens: config.outputMaxTokens },
             resolveEffort: (request) => {
+                const requested = request?.reasoningEffort ?? request?.config?.reasoningEffort;
                 const decision = (0, effort_policy_1.decideEffort)({
                     messages: request?.messages,
-                    requested: request?.reasoningEffort,
+                    requested,
                     policy: {
                         enabled: config.dynamicEffortEnabled,
                         trivial: config.effortTrivial,
@@ -642,6 +643,7 @@ function apply(ctx, rawConfig = {}) {
                     tier: decision.tier,
                     from: decision.requested,
                     to: decision.effort,
+                    effortSource: requested === undefined ? 'assumed-max' : 'request',
                     reason: decision.reason,
                     escalated: decision.escalated,
                 });

@@ -225,7 +225,44 @@ compaction），需要单独测量。
 
 ---
 
-## 9. 复现
+## 9. 输出侧：钱在哪（2026-11-11 实测后追加）
+
+放开输出侧之后，先把「输出里面是什么」量清楚（同一会话 353 个 assistant 步骤）：
+
+| 组成 | 占输出字符 | 说明 |
+|---|---:|---|
+| **reasoning** | **60.7%** | 思考过程，按 output 价计费 |
+| tool-call 参数 | 37.6% | 真正写代码/diff 的部分 |
+| 正文 | 1.8% | 几乎没有客套 |
+
+而 output 占账单 67.1%，所以 **reasoning 一项约等于账单的 40%**。
+
+再按「规划步 / 执行步」拆（规划步 = 本轮首个请求，最后一条消息是用户消息）：
+
+| 步骤类型 | 步数 | reasoning 占比 | output 占比 |
+|---|---:|---:|---:|
+| 规划步 | 9 | 6.6% | 4.1% |
+| **执行步** | **376** | **93.4%** | **95.9%** |
+
+也就是说：**几乎所有思考开销都发生在「照计划执行」的步骤上**，而 profile 把每一步都钉在
+`max`（模型自己的说明：max = "Reserve for the hardest quality-first tasks"，
+high 才是 "the default balance for most tasks"）。
+
+对应实现 `src/modules/effort-policy.ts`：
+
+- 按本轮用户消息判定档位（trivial / easy / normal / hard）；
+- **规划步**拿该档位的完整思考预算；
+- **执行步降一档**（max→high、high→low），因为计划已经有了，重推一遍是纯开销；
+- 工具报错时**回升到 hard 档**（诊断需要深度）；
+- 硬安全阀：`lowerEffort()` 保证**只降不升**，宿主若已更低就听宿主的；
+- 每次决策写 `effort.decided`（tier / from / to / reason / effortSource），可逐条审计。
+
+预估（**预测**）：若 max→high 能让执行步的 reasoning 降 30%–40%，
+则 ≈ 0.934 × 0.35 × 0.607 × 0.671 ≈ **13% 账单**；再叠加简单轮次的 low/off。
+
+---
+
+## 10. 复现
 
 ```powershell
 cd D:\PC\dsh\dsh-context-manager
