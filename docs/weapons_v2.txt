@@ -1,0 +1,65 @@
+==================== CostKillerOrchestrator 终极武器库 v2.0（50 项） ====================
+
+状态图例：✅已集成 ◐部分 ❌未集成 📚参考实现
+
+【一、源头截流与准入治理（Schema / 输出）】
+1. MCP Tool Tax：工具 Schema 无状态注入每轮 10k-60k tokens。✅（schema 压缩）
+2. Tool Attention / Lazy Tool：意图-模式评分，只注入 top-k 完整 Schema。✅（分层：top3 全量 + 7 签名）
+3. PTC（程序化工具调用）：wire 协议收拢为 run_code，输入 Token 降 77%。❌
+4. Progressive Disclosure：只保留工具/Skill 轻量目录，索引成本 1/43.9。◐（目录 + search_tools）
+5. ToolSift / 搜索元工具：只暴露 search_tools + invoke_tool，BM25。◐（search_tools 已有，无 invoke_tool）
+6. mcp-tool-search：4 个轻量代理工具替代数十 Schema，削 85-96%。❌
+7. mcp-context-proxy：懒加载 Schema，开销降 4-32 倍，磁盘缓存。◐
+8. lazy-mcp：普通 MCP 转懒加载，初始上下文 -90%。◐
+9. Context Slope：降低每次请求增量，防止触发不必要压缩。✅（SCOPE 预算 + 请求级重写）
+10. 上下文防火墙（Pointer-First）：超大输出先摘要+落盘指针。✅
+
+【二、结构化压缩与无损折叠（Extraction / Memory）】
+11. CMV（无损修剪）：DAG 三趟无损裁剪，平均 -20%~39%。◐（请求级重写，未做 DAG）
+12. Slipstream（异步折叠）：压缩器与 Agent 并行，Judge 验证摘要。❌
+13. CoT Distillation：剥离 thought，蒸馏单行决策。✅
+14. CWL（结构化逐出）：按 DAG 依赖逐出已完成 episode。❌
+15. AgentDiet（轨迹瘦身）：局部窗口反射，总成本 -21%~35%。◐（历史重写）
+16. 机械抽取 vs LLM 摘要：机械抽取保留细节 79.1%。✅
+17. TOON / 表格化编码：JSON 数组列式重编码，-30%~60%。✅（实测 -64.4%）
+18. Squeeze / 去重折叠：重复报错折叠一行，完全无损。◐（重复行 ⟨×N⟩，DedupBus）
+19. context-compress：多模式工具输出压缩，编程会话 -99.2%。◐
+20. Squeez（LoRA 2B 过滤）：压缩 ~91%，保留 86% 相关信息。❌
+21. SUMONE：独立摘要器，成本 -78%。❌
+22. AttnCompress：PPL 尖峰 + proxy 注意力，成本 -33.6%。❌
+23. PAIR：反事实延续识别压缩损坏。❌
+24. EVOKE：可逆 KV 缓存逐出到主机 RAM，成本 -5.9~7.5×。❌
+25. SLAKE / Lethe：KV 逐出与剪枝。❌
+26. QRAE / FOCUS：查询相关注意力熵、决策保持压缩。❌
+
+【三、缓存经济学与冷酷仲裁（CacheAnchor）】
+27. Cache Stampede：前缀偏离导致命中率跌至 10.1%。✅（前缀对齐红线）
+28. Cache Anchor：冷读惩罚 vs 压缩收益净额门控。✅（官方单价版）
+29. 寿命摊销：剩余轮次 × 每轮节省 > 冷读罚金才破缓存。✅
+30. TTL Keepalive：按 Provider TTL（约4分钟）重放前缀，恢复后成本 -12.5×。❌
+31. RR-Evict：轮转逐出，P99 TTFT -75.4%。❌
+32. Circuit Breaker：连续失败/无收益触发 open，冷却期透传。✅
+33. SmartCache：语义分层逐出，跨会话 KV 共享，KV -59.1%。❌
+34. CanonCache：语义 KV 规范化，命中 5%→37.5%，token -47.5%。❌
+35. TokenPilot：双粒度上下文管理，成本 -87%。❌
+36. OSIRIS：前缀缓存感知状态密封，三套哈希区分漂移与增长。✅（system/tools/history + intent bucket）
+
+【四、多智能体路由与语义缓存（Routing）】
+37. RCR-Router：按 Agent 角色（Executor/Judge）分配上下文子集，-35%。❌
+38. Judge Dense Prefill：仲裁/评审禁止 KV 复用，强制 dense prefill。❌
+39. EchoKill / CAS：跨 Agent 内容寻址存储，只传 hash，冗余 -65%~82%。◐（ToolPipe / ResponseCache）
+40. 语义缓存：向量/Jaccard 相似度拦截重复问题。✅（Jaccard ≥0.85，实测 0.895）
+41. STEER / AIMS / 本地路由：小模型置信度路由，简单任务走本地 Ollama。◐（500ms 探测 + 默认开启，需本机 Ollama）
+42. RAMPART：编译时内存模型 + 纯 RAM 块注册表。❌
+43. Gated-Memory Routing：相关+新颖才写入，自适应暂停。❌
+
+【五、失效兜底与防降智】
+44. Fail-Closed：无法保证 CORE_CONSTRAINTS 闭包时放弃压缩。✅
+45. 预提取兜底（Pre-Extraction）：摘要失败从结构化记忆提取角色/事实/证据。◐
+46. 对抗性测试矩阵：畸形输入、空输入、打断 tool-call 配对。✅（verify A/B/C + host-sim）
+
+【六、DSH 社区与前沿开源参考】
+47. dsh-token-optimizer：分层管线（L0观测/L1清理/L2摘要），长会话 -40%~60%。📚
+48. mcp-context-proxy / mcp-lazy-proxy：MCP Schema 懒加载，6-7×削减。📚
+49. headroom：分层 + 图记忆压缩代理，跨 Agent 共享存储。📚
+50. context-compress：MCP 服务器 + 钩子工具包，工具输出 -99.2%。📚
