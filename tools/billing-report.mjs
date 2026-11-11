@@ -50,8 +50,10 @@ export function analyze(file) {
     if (e.type !== 'assistant/message' || !e.data?.usage) continue;
     const u = e.data.usage;
     const cumHit = u.cacheReadTokens ?? 0;
-    const hit = Math.max(0, cumHit - prevCumHit);
-    prevCumHit = Math.max(prevCumHit, cumHit);
+    // 计数器会随宿主重启重置（实测 296448 -> 5760）：回退时按新序列起算，
+    // 直接 max(0, cum - prev) 会把重置后的第一段缓存命中算成 0。
+    const hit = cumHit >= prevCumHit ? cumHit - prevCumHit : cumHit;
+    prevCumHit = cumHit;
     const miss = u.inputTokens ?? 0;
     const out = u.outputTokens ?? 0;
     const prompt = miss + hit;

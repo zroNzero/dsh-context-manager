@@ -116,6 +116,13 @@ export interface SchemaCompressorOptions {
         maxSessions?: number;
     };
     /**
+     * 动态 reasoning effort：返回要写进请求的档位。实现方必须保证只下调、不上调
+     * （见 modules/effort-policy.ts）。返回 null 表示不干预。
+     */
+    resolveEffort?: (request: any) => {
+        effort: string;
+    } | null;
+    /**
      * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
      * 并同时给出同一请求压缩前/后的载荷字符数，供 BillingLedger 实测校准。
      */

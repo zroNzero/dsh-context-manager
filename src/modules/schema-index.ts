@@ -212,6 +212,11 @@ export interface SchemaCompressorOptions {
     maxSessions?: number
   }
   /**
+   * 动态 reasoning effort：返回要写进请求的档位。实现方必须保证只下调、不上调
+   * （见 modules/effort-policy.ts）。返回 null 表示不干预。
+   */
+  resolveEffort?: (request: any) => { effort: string } | null
+  /**
    * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
    * 并同时给出同一请求压缩前/后的载荷字符数，供 BillingLedger 实测校准。
    */
@@ -642,7 +647,13 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   }
   const runOptimized = (invoke: (request: any) => any, request: any): any => {
     const beforeChars = payloadChars(request)
-    const optimized = transform(request)
+    const transformed = transform(request)
+    // 动态 reasoning effort：只改采样参数，不动 prompt，因此与缓存完全无关。
+    let optimized = transformed
+    const effort = options.resolveEffort?.(transformed)
+    if (effort && effort.effort && effort.effort !== (transformed as any)?.reasoningEffort) {
+      optimized = { ...transformed, reasoningEffort: effort.effort }
+    }
     const afterChars = payloadChars(optimized)
     const cache = options.responseCache
     if (!cache) return invokeMeasured(invoke, optimized, beforeChars, afterChars)

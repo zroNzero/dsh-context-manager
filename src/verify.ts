@@ -757,6 +757,34 @@ async function main(): Promise<void> {
     assert(text.includes('最后的结论也必须保留。'), 'tail of the answer was dropped')
   })
 
+  await check('effort: sizing is applied at the llm boundary, never raised', async () => {
+    const captured: any[] = []
+    const ctxE: any = { systemPrompt: { section: () => () => {} }, tools: { register: () => () => {} }, on: () => () => {} }
+    ctxE.llm = {
+      stream(request: any) {
+        captured.push(request)
+        return (async function* () {})()
+      },
+    }
+    const disposeE = apply(ctxE, cfg)
+    const send = (text: string, effort: string) =>
+      ctxE.llm.stream({
+        provider: 'p',
+        model: 'm',
+        reasoningEffort: effort,
+        messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+      })
+    send('把这段 JSON 格式化一下', 'max') // trivial -> off
+    send('继续', 'max') // easy -> low
+    send('重构鉴权模块并排查这个死锁', 'max') // hard -> max 保持不变
+    send('重构鉴权模块并排查这个死锁', 'low') // hard 但宿主更低 -> 不上调
+    disposeE()
+    assert(captured[0].reasoningEffort === 'off', `trivial turn must run at off, got ${captured[0].reasoningEffort}`)
+    assert(captured[1].reasoningEffort === 'low', `easy turn must run at low, got ${captured[1].reasoningEffort}`)
+    assert(captured[2].reasoningEffort === 'max', `hard turn must keep max, got ${captured[2].reasoningEffort}`)
+    assert(captured[3].reasoningEffort === 'low', `must never raise above the host request, got ${captured[3].reasoningEffort}`)
+  })
+
   await check('response cache replays identical request', async () => {
     const ctx6: any = { systemPrompt: { section: () => () => {} }, tools: { register: () => () => {} }, on: () => () => {} }
     let calls = 0

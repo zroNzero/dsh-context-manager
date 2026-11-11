@@ -125,6 +125,12 @@ dsh install D:\path\to\dsh-context-manager
         keepaliveTtlMs: 240000
         keepaliveRefreshes: 4
         keepaliveMinPromptTokens: 500   # 收益与 prompt 量级成正比，阈值只需挡掉微不足道的请求
+        dynamicEffortEnabled: true      # 按任务难度分配思考预算，只下调不上调
+        effortTrivial: off
+        effortEasy: low
+        effortNormal: high
+        effortHard: max                 # 规划步用这个档；执行步自动降一档
+        effortEscalateOnError: true     # 工具报错时回到高思考（诊断需要深度）
         outputGuardEnabled: false       # 会砍掉正常回答（首个代码块/JSON 闭合即停），默认关
         localBaseUrl: http://127.0.0.1:11434
         compressionBudgetMs: 50

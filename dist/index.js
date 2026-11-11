@@ -58,6 +58,7 @@ const extraction_1 = require("./modules/extraction");
 const memory_1 = require("./modules/memory");
 const routing_1 = require("./modules/routing");
 const spill_gc_1 = require("./modules/spill-gc");
+const effort_policy_1 = require("./modules/effort-policy");
 const schema_index_1 = require("./modules/schema-index");
 const breaker_1 = require("./modules/breaker");
 const dedup_bus_1 = require("./modules/dedup-bus");
@@ -128,6 +129,16 @@ exports.Config = zod_1.z.object({
     keepaliveTtlMs: zod_1.z.number().int().positive().default(240_000),
     keepaliveRefreshes: zod_1.z.number().int().min(0).max(24).default(4),
     keepaliveMinPromptTokens: zod_1.z.number().int().positive().default(500),
+    /**
+     * 动态 reasoning effort（默认开）。按本轮任务难度分配思考预算，只在不需要深思的
+     * 地方省，绝不往上加。实测 reasoning 占输出 60.7%、输出占账单 67.1%。
+     */
+    dynamicEffortEnabled: zod_1.z.boolean().default(true),
+    effortTrivial: zod_1.z.enum(['off', 'low', 'high', 'max']).default('off'),
+    effortEasy: zod_1.z.enum(['off', 'low', 'high', 'max']).default('low'),
+    effortNormal: zod_1.z.enum(['off', 'low', 'high', 'max']).default('high'),
+    effortHard: zod_1.z.enum(['off', 'low', 'high', 'max']).default('max'),
+    effortEscalateOnError: zod_1.z.boolean().default(true),
     /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
     /**
      * 动态工具集（Tool Attention 分层）默认关闭 —— 与 keepalive 直接冲突。
@@ -158,6 +169,9 @@ const POLICY_TEXT = [
     'You are running with CostKillerOrchestrator active.',
     'Large tool outputs are replaced by a [ADMISSION] receipt holding the absolute spill path: use the read tool instead of re-running the command.',
     'Compressed history may contain [CORE_CONSTRAINTS] blocks; never drop, reorder, or rewrite those constraints.',
+    // 输出纪律：提高信息密度，不降低能力。省的是客套与复述，不是结论。
+    'Output discipline: lead with the result. No preamble, no restating the request, no closing pleasantries, no summary of what you just did if the diff or output already shows it.',
+    'Prefer minimal diffs, JSON, or tables over prose; include only the lines that changed and never print a whole file unless asked. Reasoning effort is sized per task, so spend tokens on the work, not on narration.',
 ].join(' ');
 function textOfContent(content) {
     if (typeof content === 'string')
@@ -607,6 +621,32 @@ function apply(ctx, rawConfig = {}) {
             onCacheHit: () => (0, log_1.logEvent)('info', 'cache.response_hit', responseCache.stats()),
             onSemanticHit: (score) => (0, log_1.logEvent)('info', 'cache.semantic_hit', { score, ...responseCache.stats() }),
             outputGuard: { enabled: config.outputGuardEnabled, maxTokens: config.outputMaxTokens },
+            resolveEffort: (request) => {
+                const decision = (0, effort_policy_1.decideEffort)({
+                    messages: request?.messages,
+                    requested: request?.reasoningEffort,
+                    policy: {
+                        enabled: config.dynamicEffortEnabled,
+                        trivial: config.effortTrivial,
+                        easy: config.effortEasy,
+                        normal: config.effortNormal,
+                        hard: config.effortHard,
+                        escalateOnError: config.effortEscalateOnError,
+                    },
+                });
+                if (decision.effort === decision.requested)
+                    return null;
+                (0, log_1.logEvent)('info', 'effort.decided', {
+                    module: 'EffortPolicy',
+                    sessionId: request?.sessionId ?? 'unknown',
+                    tier: decision.tier,
+                    from: decision.requested,
+                    to: decision.effort,
+                    reason: decision.reason,
+                    escalated: decision.escalated,
+                });
+                return { effort: decision.effort };
+            },
             keepalive: {
                 enabled: config.keepaliveEnabled,
                 ttlMs: config.keepaliveTtlMs,

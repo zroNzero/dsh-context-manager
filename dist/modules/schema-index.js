@@ -549,7 +549,13 @@ function installSchemaCompressor(ctx, options = {}) {
     };
     const runOptimized = (invoke, request) => {
         const beforeChars = payloadChars(request);
-        const optimized = transform(request);
+        const transformed = transform(request);
+        // 动态 reasoning effort：只改采样参数，不动 prompt，因此与缓存完全无关。
+        let optimized = transformed;
+        const effort = options.resolveEffort?.(transformed);
+        if (effort && effort.effort && effort.effort !== transformed?.reasoningEffort) {
+            optimized = { ...transformed, reasoningEffort: effort.effort };
+        }
         const afterChars = payloadChars(optimized);
         const cache = options.responseCache;
         if (!cache)

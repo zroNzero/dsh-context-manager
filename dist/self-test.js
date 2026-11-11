@@ -24,6 +24,7 @@ const memory_1 = require("./modules/memory");
 const host_sim_1 = require("./host-sim");
 const savings_ledger_1 = require("./modules/savings-ledger");
 const billing_1 = require("./modules/billing");
+const effort_policy_1 = require("./modules/effort-policy");
 const workspace_1 = require("./modules/workspace");
 const log_1 = require("./log");
 const outcomes = [];
@@ -422,6 +423,61 @@ check('billing.cumulative-cache-read', () => {
     });
     assert(book.hitTokens === 400, `per-request hit must be 400, got ${book.hitTokens}`);
     assert(book.missTokens === 100, `miss must stay 100, got ${book.missTokens}`);
+});
+// ---------------------------------------------------------------------------
+// 12) 动态 reasoning effort：只在不需要深思的步骤下调，绝不往上加
+// ---------------------------------------------------------------------------
+check('effort.dynamic-policy', () => {
+    const policy = { enabled: true, trivial: 'off', easy: 'low', normal: 'high', hard: 'max', escalateOnError: true };
+    assert((0, effort_policy_1.classifyTurn)('把这段 JSON 格式化一下').tier === 'trivial', 'mechanical task must be trivial');
+    assert((0, effort_policy_1.classifyTurn)('重构一下鉴权模块').tier === 'hard', 'refactor must be hard');
+    assert((0, effort_policy_1.classifyTurn)('TypeError: Cannot read properties of undefined\n    at foo (a.ts:1:2)').tier === 'hard', 'error must be hard');
+    assert((0, effort_policy_1.classifyTurn)('继续').tier === 'easy', 'short follow-up must be easy');
+    assert((0, effort_policy_1.classifyTurn)('Please read the file src/index.ts and report the exact list of exported symbols in the order they appear, with signatures.')
+        .tier === 'normal', 'plain medium request must be normal');
+    const easy = [{ role: 'user', content: [{ type: 'text', text: '继续' }] }];
+    const lowered = (0, effort_policy_1.decideEffort)({ messages: easy, requested: 'max', policy });
+    assert(lowered.requested === 'max' && lowered.effort === 'low', `easy step from max must drop to low, got ${lowered.effort}`);
+    // 只下调、不上调：宿主已经更低就听宿主的
+    const raised = (0, effort_policy_1.decideEffort)({ messages: [{ role: 'user', content: [{ type: 'text', text: '重构整个模块' }] }], requested: 'low', policy });
+    assert(raised.effort === 'low', `must never raise above the host request, got ${raised.effort}`);
+    // 轮内工具报错 -> 升级到 hard 档
+    const errored = (0, effort_policy_1.decideEffort)({
+        messages: [
+            { role: 'user', content: [{ type: 'text', text: '继续' }] },
+            { role: 'tool', content: [{ type: 'text', text: 'Error: boom\n    at x (a.ts:3:4)' }] },
+        ],
+        requested: 'max',
+        policy,
+    });
+    assert(errored.escalated === true && errored.effort === 'max', `tool error must escalate, got ${errored.effort}`);
+    // 关闭时完全透传
+    const off = (0, effort_policy_1.decideEffort)({ messages: easy, requested: 'max', policy: { ...policy, enabled: false } });
+    assert(off.effort === 'max' && off.reason === 'policy-disabled', 'disabled policy must not touch the request');
+    // 规划步 vs 执行步：同一个 hard 任务，第一问给足深度，照计划执行的后续步骤降一档
+    const hardPrompt = [{ role: 'user', content: [{ type: 'text', text: '重构鉴权模块' }] }];
+    const planning = (0, effort_policy_1.decideEffort)({ messages: hardPrompt, requested: 'max', policy });
+    assert(planning.effort === 'max' && planning.reason.endsWith(':plan'), `planning step must keep max, got ${planning.effort}`);
+    const executing = (0, effort_policy_1.decideEffort)({
+        messages: [
+            ...hardPrompt,
+            { role: 'assistant', content: [{ type: 'text', text: '开始' }] },
+            { role: 'tool', content: [{ type: 'text', text: 'ok' }] },
+        ],
+        requested: 'max',
+        policy,
+    });
+    assert(executing.effort === 'high' && executing.reason.endsWith(':execute'), `execution step must drop a notch, got ${executing.effort}`);
+    // 执行步也不会掉到底：hard 任务的下限是 low
+    const lowPlan = (0, effort_policy_1.decideEffort)({
+        messages: [
+            ...hardPrompt,
+            { role: 'tool', content: [{ type: 'text', text: 'ok' }] },
+        ],
+        requested: 'max',
+        policy: { ...policy, hard: 'low' },
+    });
+    assert(lowPlan.effort === 'off' || lowPlan.effort === 'low', `execution step must stay sane, got ${lowPlan.effort}`);
 });
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {

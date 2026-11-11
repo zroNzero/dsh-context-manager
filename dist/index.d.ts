@@ -39,6 +39,32 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     keepaliveTtlMs: z.ZodDefault<z.ZodNumber>;
     keepaliveRefreshes: z.ZodDefault<z.ZodNumber>;
     keepaliveMinPromptTokens: z.ZodDefault<z.ZodNumber>;
+    dynamicEffortEnabled: z.ZodDefault<z.ZodBoolean>;
+    effortTrivial: z.ZodDefault<z.ZodEnum<{
+        off: "off";
+        low: "low";
+        high: "high";
+        max: "max";
+    }>>;
+    effortEasy: z.ZodDefault<z.ZodEnum<{
+        off: "off";
+        low: "low";
+        high: "high";
+        max: "max";
+    }>>;
+    effortNormal: z.ZodDefault<z.ZodEnum<{
+        off: "off";
+        low: "low";
+        high: "high";
+        max: "max";
+    }>>;
+    effortHard: z.ZodDefault<z.ZodEnum<{
+        off: "off";
+        low: "low";
+        high: "high";
+        max: "max";
+    }>>;
+    effortEscalateOnError: z.ZodDefault<z.ZodBoolean>;
     toolAttentionEnabled: z.ZodDefault<z.ZodBoolean>;
     toolAttentionTopK: z.ZodDefault<z.ZodNumber>;
     localBaseUrl: z.ZodDefault<z.ZodString>;
