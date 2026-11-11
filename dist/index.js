@@ -327,6 +327,57 @@ function buildStatusTool(getStatus) {
                     ledgerId: { type: 'string' },
                     revision: { type: 'number' },
                     savingsFile: { type: 'string' },
+                    /**
+                     * 真实账单必须在这里声明完整：
+                     * 宿主按 `additionalProperties: false` 校验工具返回值，少声明一个字段
+                     * 整个工具就报 `returned invalid output`（实盘踩到：realBilling/realBillFile/
+                     * debugLogFile 三个字段漏声明，costkiller_status 直接不可用）。
+                     */
+                    realBilling: {
+                        type: 'object',
+                        properties: {
+                            requests: { type: 'number' },
+                            currency: { type: 'string' },
+                            actualCost: { type: 'number' },
+                            counterfactualCost: { type: 'number' },
+                            savedCost: { type: 'number' },
+                            reduction: { type: 'number' },
+                            cacheHitRate: { type: 'number' },
+                            missTokens: { type: 'number' },
+                            hitTokens: { type: 'number' },
+                            outputTokens: { type: 'number' },
+                            unverifiedOutputTokens: { type: 'number' },
+                            lastPricing: {
+                                type: 'object',
+                                properties: {
+                                    tier: { type: 'string' },
+                                    window: { type: 'string' },
+                                    hit: { type: 'number' },
+                                    miss: { type: 'number' },
+                                    output: { type: 'number' },
+                                },
+                                required: ['tier', 'window', 'hit', 'miss', 'output'],
+                                additionalProperties: false,
+                            },
+                        },
+                        required: [
+                            'requests',
+                            'currency',
+                            'actualCost',
+                            'counterfactualCost',
+                            'savedCost',
+                            'reduction',
+                            'cacheHitRate',
+                            'missTokens',
+                            'hitTokens',
+                            'outputTokens',
+                            'unverifiedOutputTokens',
+                            'lastPricing',
+                        ],
+                        additionalProperties: false,
+                    },
+                    realBillFile: { type: 'string' },
+                    debugLogFile: { type: 'string' },
                 },
                 required: [
                     'ok',
@@ -352,6 +403,9 @@ function buildStatusTool(getStatus) {
                     'ledgerId',
                     'revision',
                     'savingsFile',
+                    'realBilling',
+                    'realBillFile',
+                    'debugLogFile',
                 ],
                 additionalProperties: false,
             },
@@ -546,7 +600,15 @@ function apply(ctx, rawConfig = {}) {
                     hitTokens: real.hitTokens,
                     outputTokens: real.outputTokens,
                     unverifiedOutputTokens: real.unverifiedOutputTokens,
-                    lastPricing: real.lastPricing,
+                    // 没有请求时账本里 lastPricing 是 null；这里给一个形状稳定的默认值，
+                    // 免得工具声明的 schema 和实际返回对不上（宿主按 additionalProperties:false 校验）。
+                    lastPricing: {
+                        tier: String(real.lastPricing?.tier ?? 'unknown'),
+                        window: String(real.lastPricing?.window ?? 'offpeak'),
+                        hit: Number(real.lastPricing?.hit ?? 0),
+                        miss: Number(real.lastPricing?.miss ?? 0),
+                        output: Number(real.lastPricing?.output ?? 0),
+                    },
                 },
                 realBillFile: realBillMarkdown,
                 debugLogFile: log_1.LOG_FILE_PATH,

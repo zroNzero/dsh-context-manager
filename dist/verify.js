@@ -131,6 +131,44 @@ async function main() {
         assert(hooks.has('agent/pre-step'), 'pre-step hook missing');
         assert(typeof disposer === 'function', 'apply must return disposer');
     });
+    /**
+     * 回归：工具声明的 output.schema 必须能装下它自己返回的对象。
+     * 宿主按 `additionalProperties: false` 校验返回值，漏声明一个字段整个工具就报
+     * `returned invalid output`（实盘踩到：realBilling/realBillFile/debugLogFile）。
+     * 这里不引 ajv，只按 schema 递归核对：键必须在 properties 里、required 必须给全。
+     */
+    await check('status tool output matches its declared schema', async () => {
+        const tool = tools.find((item) => item.name === 'costkiller_status');
+        assert(tool, 'status tool missing');
+        const value = await tool.execute({});
+        const walk = (schema, node, path) => {
+            assert(schema && typeof schema === 'object', `${path}: missing schema`);
+            if (schema.type === 'object' || schema.properties) {
+                assert(node && typeof node === 'object', `${path}: expected object`);
+                const declared = schema.properties ?? {};
+                for (const key of Object.keys(node)) {
+                    assert(declared[key], `${path}.${key} is not declared (additionalProperties: false)`);
+                }
+                for (const key of schema.required ?? []) {
+                    assert(Object.prototype.hasOwnProperty.call(node, key), `${path}.${key} is required but missing`);
+                }
+                for (const [key, child] of Object.entries(node)) {
+                    if (declared[key])
+                        walk(declared[key], child, `${path}.${key}`);
+                }
+            }
+            else if (schema.type === 'number') {
+                assert(typeof node === 'number' && Number.isFinite(node), `${path}: expected finite number`);
+            }
+            else if (schema.type === 'string') {
+                assert(typeof node === 'string', `${path}: expected string`);
+            }
+            else if (schema.type === 'boolean') {
+                assert(typeof node === 'boolean', `${path}: expected boolean`);
+            }
+        };
+        walk(tool.output.schema, value, 'value');
+    });
     await check('schema compression at llm boundary', () => {
         const schemaTools = Array.from({ length: 40 }, (_, index) => ({
             name: `tool_${index}`,
