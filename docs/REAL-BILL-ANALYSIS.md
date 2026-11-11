@@ -112,6 +112,22 @@ prompt 侧成本几乎全部来自 **miss（未命中缓存）**：
 两项合计上限约 **35.6%**（低于 44.2% 的理论 prompt 上限，因为命中本身也要钱），
 这就是「不降智」前提下可辩护的收益空间。
 
+### 6.1 用真实会话回放验证「重写是否真的破坏前缀」
+
+`tools/prefix-replay.mjs` 把真实会话 `b82b2558`（686 个请求、1627 条消息）的消息面
+按顺序重放，比较「上一次已发出的前缀」在这次请求里被改写了多少：
+
+| 策略 | 前缀被改写的请求数 | 改动字符占比 |
+|---|---:|---:|
+| 旧策略（截断上限随实时 token 数漂移） | **473 / 686** | 1.0% |
+| 新策略（上限固定） | 547 / 686 | 1.4% |
+| **关闭重写** | **0 / 686** | **0%** |
+
+关键结论：**只要保留「最近 N 条不动、更早的截断」这个结构，就一定会不断有消息
+"越界"而被追溯改写**——固定上限只让每条的改写结果稳定，挡不住越界本身。
+只有彻底关闭才能得到 0 改写。所以 `rewriteEnabled` 默认必须是 false，
+把它当成「用户显式选择的、接受缓存损失」的压缩选项。
+
 ## 7. 据此做出的改动（2026-11-11）
 
 定位到的根因：**历史重写的压缩上限是按「当前实时 token 数」算出来的**。
@@ -149,6 +165,7 @@ provider 只能从头 miss 重算。实测轮内命中率 24.2%（轮内上下�
 cd D:\PC\dsh\dsh-context-manager
 node tools\bill-all.mjs                                  # 全机器汇总 + 物理上限
 node tools\cache-opportunity.mjs                          # 轮内 vs 跨轮的缓存损失拆分
+node tools\prefix-replay.mjs <session.v4.jsonl.zstd>      # 真实会话回放：前缀被改写多少次
 node tools\billing-report.mjs <session.v4.jsonl.zstd>     # 单会话真实账单
 node tools\ceiling.mjs <session.v4.jsonl.zstd>            # 工具输出可及性
 node tools\prefix-stability.mjs <session.v4.jsonl.zstd>   # 前缀稳定性 / 命中率
