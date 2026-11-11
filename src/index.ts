@@ -40,6 +40,7 @@ import { BillingLedger } from './modules/billing'
 import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modules/workspace'
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
+import { evictOldEpisodes } from './modules/episode-evict'
 import { probeStaleReasoning, stripStaleReasoning } from './modules/reasoning-drop'
 import { ResponseCache } from './modules/response-cache'
 import { ToolPipe } from './modules/tool-pipe'
@@ -96,6 +97,15 @@ export const Config = z.object({
    * 参数落盘后替换成合法 JSON 收据（_spilled/_chars/_head），id 与 name 原样保留。
    */
   prefixSpillHeadChars: z.number().int().positive().default(100),
+  /**
+   * 已完成工具调用「整对逐出」（武器库 #14/#15）。`write`/`edit` 的参数里装着整个
+   * 文件内容（实测占 tool-call 参数 70%），而那文件早已在磁盘上。
+   * 逐出时把「调用 + 结果」成对移除并落盘，assistant 里只留一行纯文本指针：
+   * 既不留下模仿模板（v1.4 的 MALFORMED_RESPONSE 就是这么来的），也不留孤儿 tool 消息。
+   */
+  episodeEvictEnabled: z.boolean().default(true),
+  episodeEvictRetainRecent: z.number().int().nonnegative().default(8),
+  episodeEvictMinArgChars: z.number().int().positive().default(600),
   /**
    * 丢掉「最近 N 条之外」的历史 thinking（约占前缀 1/3）。
    * auto：启动后先发两条一次性探针，只有对照组和删除组都成功才开启；denied/inconclusive
@@ -782,7 +792,18 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
              *
              * 必须先于 rewriteMessages：后者会按字符截断，一旦先截断就没法再落盘了。
              */
-            const folded = foldOldToolResults(Array.isArray(messages) ? messages : [], {
+            /**
+             * 逐出必须先于折叠：折叠会把工具结果换成收据，那样落盘的 episode 里
+             * 就只剩收据而不是原文了。
+             */
+            const evicted = config.episodeEvictEnabled
+              ? evictOldEpisodes(Array.isArray(messages) ? messages : [], {
+                  spillDir: config.spillDir,
+                  retainRecent: config.episodeEvictRetainRecent,
+                  minArgChars: config.episodeEvictMinArgChars,
+                })
+              : { messages: Array.isArray(messages) ? messages : [], stats: null }
+            const folded = foldOldToolResults(evicted.messages, {
               spillDir: config.spillDir,
               retainRecent: config.prefixSpillRetainRecent,
               minChars: config.prefixSpillMinChars,
@@ -848,10 +869,13 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
                 blockChars['plain-string'] = (blockChars['plain-string'] ?? 0) + content.length
               }
             }
-            if (folded.stats.folded > 0 || stripStats || staleReasoningAllowed) {
+            if (folded.stats.folded > 0 || stripStats || staleReasoningAllowed || evicted.stats) {
               logEvent('debug', 'history.fold', {
                 module: 'PrefixSpill',
                 messages: Array.isArray(messages) ? messages.length : 0,
+                evictedEpisodes: evicted.stats ? evicted.stats.episodes : 0,
+                evictSaved: evicted.stats ? evicted.stats.charsSaved : 0,
+                evictDropped: evicted.stats ? evicted.stats.droppedMessages : 0,
                 foldCharsSaved: folded.stats.charsBefore - folded.stats.charsAfter,
                 folded: folded.stats.folded,
                 stripAllowed: staleReasoningAllowed,

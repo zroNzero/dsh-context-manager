@@ -18,6 +18,7 @@ import { ToolPipe } from './modules/tool-pipe'
 import { estimateTokens } from './contracts'
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
+import { evictOldEpisodes } from './modules/episode-evict'
 import { stripStaleReasoning } from './modules/reasoning-drop'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
@@ -658,8 +659,56 @@ check('billing.effort-counterfactual', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 26) 老 thinking 折叠：只动 reasoning/thinking，不动 text 与 tool-call，且结果确定
+// 27) 整对逐出：调用与结果必须同时消失（既不留孤儿，也不留模仿模板），且可无损读回
 // ---------------------------------------------------------------------------
+
+check('prefix.episode-evict-keeps-pairs-and-loses-nothing', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ck-evict-'))
+  const bigArgs = JSON.stringify({ file_path: 'src/a.ts', content: 'x'.repeat(3000) })
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'go' }] },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'r' },
+        { type: 'tool-call', id: 'call_big', name: 'write', arguments: bigArgs },
+      ],
+    },
+    { role: 'tool', toolCallId: 'call_big', content: [{ type: 'text', text: 'written' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+    { role: 'user', content: [{ type: 'text', text: 'r1' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'r2' }] },
+  ]
+  const first = evictOldEpisodes(messages, { spillDir: dir, retainRecent: 2, minArgChars: 600 })
+  const second = evictOldEpisodes(messages, { spillDir: dir, retainRecent: 2, minArgChars: 600 })
+
+  assert(first.stats.episodes === 1, `one episode evicts, got ${first.stats.episodes}`)
+  // 配对完整性：tool 结果必须跟着一起消失，否则会留孤儿 tool 消息
+  assert(
+    !first.messages.some((message: any) => message.role === 'tool' && message.toolCallId === 'call_big'),
+    'orphan tool result left behind',
+  )
+  // 模仿安全：历史里不能残留这个 tool-call 的任何形状
+  assert(
+    !JSON.stringify(first.messages).includes('call_big'),
+    'tool-call must be gone entirely: leftover shape is what the model copies',
+  )
+  // 指针是纯文本，且字节确定
+  assert(
+    JSON.stringify(first.messages[1]) === JSON.stringify(second.messages[1]),
+    'eviction pointer must be deterministic or the prefix cache dies',
+  )
+  const pointer = (first.messages[1].content as any[])
+    .map((block: any) => String(block?.text ?? ''))
+    .find((text: string) => text.includes('[evicted tool episode'))
+  assert(pointer, `pointer block missing, got ${JSON.stringify(first.messages[1].content)}`)
+  const file = pointer!.match(/episode-[0-9a-f]{12}\.json/)
+  assert(file, `pointer must name the spill file, got ${pointer}`)
+  // 无损：原文可完整读回
+  const stored = JSON.parse(fs.readFileSync(path.join(dir, file![0]), 'utf8'))
+  assert(stored.call[0].arguments === bigArgs, 'spilled arguments must be byte-exact')
+  assert(stored.result[0][0].text === 'written', 'spilled result must be byte-exact')
+})
 
 check('prefix.stale-reasoning-strip', () => {
   const messages = [

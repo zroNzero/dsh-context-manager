@@ -33,6 +33,9 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     prefixSpillRetainRecent: z.ZodDefault<z.ZodNumber>;
     prefixSpillMinChars: z.ZodDefault<z.ZodNumber>;
     prefixSpillHeadChars: z.ZodDefault<z.ZodNumber>;
+    episodeEvictEnabled: z.ZodDefault<z.ZodBoolean>;
+    episodeEvictRetainRecent: z.ZodDefault<z.ZodNumber>;
+    episodeEvictMinArgChars: z.ZodDefault<z.ZodNumber>;
     dropStaleReasoning: z.ZodDefault<z.ZodEnum<{
         off: "off";
         auto: "auto";
