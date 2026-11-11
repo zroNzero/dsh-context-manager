@@ -975,6 +975,19 @@ async function main() {
         walk(dir);
         assert(offenders.length === 0, `console.log found: ${offenders.join('; ')}`);
     });
+    /**
+     * 回归：effort 记账不能带时间窗口。
+     * 曾经用 `Date.now() - lastEffort.at < 5000` 判活，而一次真实请求从决策到收到
+     * usage 常常超过 5 秒（长上下文更久）—— 于是账本里 effort 记成 null，
+     * 输出侧省下的 token 全部漏记（实盘 7 条记录里 5 条 effort:null）。
+     * 现在按轮次失效（pre-step 更新 effortContext 时清空），不带 TTL。
+     */
+    await check('effort accounting is not gated by a time window', () => {
+        const text = node_fs_1.default.readFileSync(node_path_1.default.resolve('src/index.ts'), 'utf8');
+        assert(!/Date\.now\(\)\s*-\s*lastEffort/.test(text), 'effort bookkeeping must not expire on a timer');
+        assert(!/lastEffort\.at/.test(text), 'lastEffort no longer carries a timestamp');
+        assert(/lastEffort = null/.test(text), 'a new turn must clear the previous decision');
+    });
     await check('dispose is safe', () => {
         disposer();
         disposer();

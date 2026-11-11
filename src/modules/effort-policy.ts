@@ -213,8 +213,9 @@ export function decideEffort(input: {
       desired = oneNotchDown(desired)
       // 实测（同 prompt 四档配对）：max→high 砍掉 43% 输出，而 high→low 几乎省不到钱
       // （平均 output 344 vs 357）。所以真正干活的步骤不该掉到 low —— 花一样的钱、
-      // 少一半思考。只有 trivial/easy 这类机械轮次才允许到 off。
-      if (turn.tier === 'normal' || turn.tier === 'hard') {
+      // 少一半思考。`off` 更危险：easy 档的判定只是「用户消息短」，而短消息恰恰可能
+      // 是最含糊、最需要思考的请求。只有 trivial（机械任务：格式化/翻译/改名…）才允许 off。
+      if (turn.tier !== 'trivial') {
         if (RANK[desired] < RANK['high']) desired = 'high'
       }
       reason = `${turn.reason}:execute`

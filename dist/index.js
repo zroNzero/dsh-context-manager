@@ -443,7 +443,13 @@ function apply(ctx, rawConfig = {}) {
     const sessionWorkspaces = new Map();
     /** 最近一次 pre-step 的观测信号，供 prepareCall 前判定 reasoning effort。 */
     let effortContext = null;
-    /** 最近一次 effort 决策（供真实账本把 effort 杠杆折算成反事实成本）。 */
+    /**
+     * 最近一次 effort 决策（供真实账本把 effort 杠杆折算成反事实成本）。
+     * 不带时间戳过期：一次真实请求从决策到收到 usage 可能超过 10 秒（实测 1.3–5.6s，
+     * 长上下文更久），用 TTL 判活会把 effort 记成 null，输出侧杠杆在账本里直接归零
+     * （实测 7 条记录里 5 条 effort:null）。改为「按轮次失效」：pre-step 更新
+     * effortContext 时一并清空，跨轮不会串味。
+     */
     let lastEffort = null;
     /**
      * 用户配置的 reasoning effort —— 只作为「不得超越」的上限。
@@ -702,7 +708,7 @@ function apply(ctx, rawConfig = {}) {
                         escalateOnError: config.effortEscalateOnError,
                     },
                 });
-                lastEffort = { effort: String(decision.effort), baseline: String(baseline.effort ?? 'max'), at: Date.now() };
+                lastEffort = { effort: String(decision.effort), baseline: String(baseline.effort ?? 'max') };
                 if (!decision.effort || decision.effort === decision.requested)
                     return controls;
                 (0, log_1.logEvent)('info', 'effort.decided', {
@@ -735,7 +741,7 @@ function apply(ctx, rawConfig = {}) {
                         escalateOnError: config.effortEscalateOnError,
                     },
                 });
-                lastEffort = { effort: String(decision.effort), baseline: String(baseline.effort ?? 'max'), at: Date.now() };
+                lastEffort = { effort: String(decision.effort), baseline: String(baseline.effort ?? 'max') };
                 if (decision.effort === decision.requested)
                     return null;
                 (0, log_1.logEvent)('info', 'effort.decided', {
@@ -760,7 +766,7 @@ function apply(ctx, rawConfig = {}) {
             },
             onOutputTruncated: (reason) => (0, log_1.logEvent)('info', 'output.truncated', { module: 'OutputGuard', reason, maxTokens: config.outputMaxTokens }),
             toolAttention: { enabled: config.toolAttentionEnabled, topK: config.toolAttentionTopK },
-            effortContext: () => (lastEffort && Date.now() - lastEffort.at < 5000 ? { effort: lastEffort.effort, baseline: lastEffort.baseline } : null),
+            effortContext: () => (lastEffort ? { effort: lastEffort.effort, baseline: lastEffort.baseline } : null),
             onUsage: ({ purpose, model, usage, beforeChars, afterChars, effort, baselineEffort }) => {
                 const record = billing.record({ purpose, model, usage, beforeChars, afterChars, effort, baselineEffort });
                 if (record)
@@ -1034,6 +1040,8 @@ function apply(ctx, rawConfig = {}) {
                         break;
                     }
                 }
+                // 新一轮观测：上一轮的 effort 决策随之失效，避免跨轮串味。
+                lastEffort = null;
                 effortContext = {
                     userText,
                     lastRole: String(last?.role ?? ''),
