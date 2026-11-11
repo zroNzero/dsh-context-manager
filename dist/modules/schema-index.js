@@ -497,12 +497,20 @@ function installSchemaCompressor(ctx, options = {}) {
         }
         armKeepalive(key, invoke, optimized, promptTokens);
     };
-    const observeUsage = (chunk, optimized, beforeChars, afterChars, invoke) => {
+    let keepaliveSkipLogged = false;
+    const observeUsage = (chunk, optimized, beforeChars, afterChars, invoke, allowKeepalive = true) => {
         if (chunk?.type !== 'usage' || !chunk.usage)
             return;
         const isKeepalive = optimized?.purpose === 'cache-keepalive';
         const hitDelta = cacheRead.normalize(String(optimized?.sessionId ?? 'default'), chunk.usage.cacheReadTokens ?? 0);
-        if (!isKeepalive && keepaliveCfg?.enabled) {
+        if (!isKeepalive && keepaliveCfg?.enabled && !allowKeepalive && !keepaliveSkipLogged) {
+            keepaliveSkipLogged = true;
+            (0, log_1.logEvent)('info', 'cache.keepalive_skipped', {
+                module: 'Keepalive',
+                reason: 'prepared call config is immutable; keepalive never mutates it',
+            });
+        }
+        if (!isKeepalive && keepaliveCfg?.enabled && allowKeepalive) {
             // 真实请求发出去了：它自己会刷新缓存，先撤掉这个会话挂起的保活。
             const key = String(optimized?.sessionId ?? 'default');
             const existing = keepaliveSlots.get(key);
@@ -536,36 +544,37 @@ function installSchemaCompressor(ctx, options = {}) {
         }
     };
     /** 在透传 chunk 的同时把 provider usage 交给真实账本；不改动流本身。 */
-    const invokeMeasured = (invoke, optimized, beforeChars, afterChars) => {
+    const invokeMeasured = (invoke, optimized, beforeChars, afterChars, allowKeepalive = true) => {
         const source = invoke(optimized);
         if (!source || typeof source[Symbol.asyncIterator] !== 'function')
             return source;
         return (async function* () {
             for await (const chunk of source) {
-                observeUsage(chunk, optimized, beforeChars, afterChars, invoke);
+                observeUsage(chunk, optimized, beforeChars, afterChars, invoke, allowKeepalive);
                 yield chunk;
             }
         })();
     };
-    const runOptimized = (invoke, request) => {
+    const runOptimized = (invoke, request, prepared) => {
         const beforeChars = payloadChars(request);
         const transformed = transform(request);
-        // 动态 reasoning effort：只改采样参数，不动 prompt，因此与缓存完全无关。
+        // 动态 reasoning effort：prepared 路径必须在 prepareCall 前修正（见 prepareCallConfig），
+        // 这里只对 direct stream 生效；否则会触发 INVALID_PREPARED_CALL。
         let optimized = transformed;
         const effort = options.resolveEffort?.(transformed);
-        if (effort && effort.effort && effort.effort !== transformed?.reasoningEffort) {
+        if (!prepared && effort && effort.effort && effort.effort !== transformed?.reasoningEffort) {
             optimized = { ...transformed, reasoningEffort: effort.effort };
         }
         const afterChars = payloadChars(optimized);
         const cache = options.responseCache;
         if (!cache)
-            return invokeMeasured(invoke, optimized, beforeChars, afterChars);
+            return invokeMeasured(invoke, optimized, beforeChars, afterChars, !prepared);
         let key;
         try {
             key = cache.keyFor(optimized);
         }
         catch {
-            return invokeMeasured(invoke, optimized, beforeChars, afterChars);
+            return invokeMeasured(invoke, optimized, beforeChars, afterChars, !prepared);
         }
         const hit = cache.get(key);
         if (hit) {
@@ -591,7 +600,7 @@ function installSchemaCompressor(ctx, options = {}) {
         return (async function* () {
             const chunks = [];
             for await (const chunk of stream) {
-                observeUsage(chunk, optimized, beforeChars, afterChars, invoke);
+                observeUsage(chunk, optimized, beforeChars, afterChars, invoke, !prepared);
                 chunks.push(chunk);
                 yield chunk;
             }
@@ -601,17 +610,18 @@ function installSchemaCompressor(ctx, options = {}) {
     try {
         llm.stream = function patchedStream(request) {
             const self = this;
-            return runOptimized((optimized) => originalStream.call(self, optimized), request);
+            return runOptimized((optimized) => originalStream.call(self, optimized), request, false);
         };
         if (typeof originalPrepare === 'function') {
             llm.prepareCall = async function patchedPrepare(config, signal, configure) {
-                const prepared = await originalPrepare.call(this, config, signal, configure);
+                const nextConfig = options.prepareCallConfig ? options.prepareCallConfig(config) : config;
+                const prepared = await originalPrepare.call(this, nextConfig, signal, configure);
                 if (!prepared || typeof prepared.stream !== 'function')
                     return prepared;
                 const preparedStream = prepared.stream;
                 return {
                     ...prepared,
-                    stream: (request) => runOptimized((optimized) => preparedStream.call(prepared, optimized), request),
+                    stream: (request) => runOptimized((optimized) => preparedStream.call(prepared, optimized), request, true),
                 };
             };
         }

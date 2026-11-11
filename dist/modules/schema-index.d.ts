@@ -123,6 +123,12 @@ export interface SchemaCompressorOptions {
         effort: string;
     } | null;
     /**
+     * 在 prepareCall 之前修正 call config（provider/model/reasoningEffort/temperature/maxTokens/stop）。
+     * DSH 会冻结 prepare 解析出的 config 并在 dispatch 时做相等校验，因此 effort 必须在这里改，
+     * 绝不能在 stream 阶段改（会触发 INVALID_PREPARED_CALL）。
+     */
+    prepareCallConfig?: (config: any) => any;
+    /**
      * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
      * 并同时给出同一请求压缩前/后的载荷字符数，供 BillingLedger 实测校准。
      */

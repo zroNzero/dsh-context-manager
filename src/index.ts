@@ -419,6 +419,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
   // 会话 -> 工作区映射：schema 压缩发生在 llm 层，只能靠 sessionId 反查。
   const sessionWorkspaces = new Map<string, WorkspaceRef>()
+  /** 最近一次 pre-step 的消息视图，供 prepareCall 前判定 reasoning effort。 */
+  let effortMessages: any[] | null = null
   const liveSession = (sessionId: string, fallback: any): any => {
     try {
       const store = (services as any).sessions
@@ -601,6 +603,34 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       onCacheHit: () => logEvent('info', 'cache.response_hit', responseCache.stats()),
       onSemanticHit: (score: number) => logEvent('info', 'cache.semantic_hit', { score, ...responseCache.stats() }),
       outputGuard: { enabled: config.outputGuardEnabled, maxTokens: config.outputMaxTokens },
+      prepareCallConfig: (callConfig: any) => {
+        if (!config.dynamicEffortEnabled || effortMessages === null) return callConfig
+        const requested = callConfig?.reasoningEffort
+        const decision = decideEffort({
+          messages: effortMessages,
+          requested,
+          policy: {
+            enabled: config.dynamicEffortEnabled,
+            trivial: config.effortTrivial,
+            easy: config.effortEasy,
+            normal: config.effortNormal,
+            hard: config.effortHard,
+            escalateOnError: config.effortEscalateOnError,
+          },
+        })
+        if (!decision.effort || decision.effort === decision.requested) return callConfig
+        logEvent('info', 'effort.decided', {
+          module: 'EffortPolicy',
+          scope: 'prepareCall',
+          tier: decision.tier,
+          from: decision.requested,
+          to: decision.effort,
+          effortSource: requested === undefined ? 'assumed-max' : 'request',
+          reason: decision.reason,
+          escalated: decision.escalated,
+        })
+        return { ...callConfig, reasoningEffort: decision.effort }
+      },
       resolveEffort: (request: any) => {
         const requested = request?.reasoningEffort ?? request?.config?.reasoningEffort
         const decision = decideEffort({
@@ -906,6 +936,10 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
       const entries = collectEntries(live)
       if (entries.length === 0) return downstream
+      effortMessages = entries.slice(-8).map((entry) => ({
+        role: entry.role,
+        content: [{ type: 'text', text: entry.text }],
+      }))
 
       const workspace = workspaceFor(live, payload?.agent)
       if (!sessionWorkspaces.has(sessionId)) {

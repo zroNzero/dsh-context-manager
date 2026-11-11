@@ -217,6 +217,12 @@ export interface SchemaCompressorOptions {
    */
   resolveEffort?: (request: any) => { effort: string } | null
   /**
+   * 在 prepareCall 之前修正 call config（provider/model/reasoningEffort/temperature/maxTokens/stop）。
+   * DSH 会冻结 prepare 解析出的 config 并在 dispatch 时做相等校验，因此 effort 必须在这里改，
+   * 绝不能在 stream 阶段改（会触发 INVALID_PREPARED_CALL）。
+   */
+  prepareCallConfig?: (config: any) => any
+  /**
    * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
    * 并同时给出同一请求压缩前/后的载荷字符数，供 BillingLedger 实测校准。
    */
@@ -599,11 +605,26 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     armKeepalive(key, invoke, optimized, promptTokens)
   }
 
-  const observeUsage = (chunk: any, optimized: any, beforeChars: number, afterChars: number, invoke: (request: any) => any): void => {
+  let keepaliveSkipLogged = false
+  const observeUsage = (
+    chunk: any,
+    optimized: any,
+    beforeChars: number,
+    afterChars: number,
+    invoke: (request: any) => any,
+    allowKeepalive = true,
+  ): void => {
     if (chunk?.type !== 'usage' || !chunk.usage) return
     const isKeepalive = optimized?.purpose === 'cache-keepalive'
     const hitDelta = cacheRead.normalize(String(optimized?.sessionId ?? 'default'), chunk.usage.cacheReadTokens ?? 0)
-    if (!isKeepalive && keepaliveCfg?.enabled) {
+    if (!isKeepalive && keepaliveCfg?.enabled && !allowKeepalive && !keepaliveSkipLogged) {
+      keepaliveSkipLogged = true
+      logEvent('info', 'cache.keepalive_skipped', {
+        module: 'Keepalive',
+        reason: 'prepared call config is immutable; keepalive never mutates it',
+      })
+    }
+    if (!isKeepalive && keepaliveCfg?.enabled && allowKeepalive) {
       // 真实请求发出去了：它自己会刷新缓存，先撤掉这个会话挂起的保活。
       const key = String(optimized?.sessionId ?? 'default')
       const existing = keepaliveSlots.get(key)
@@ -635,33 +656,40 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   }
 
   /** 在透传 chunk 的同时把 provider usage 交给真实账本；不改动流本身。 */
-  const invokeMeasured = (invoke: (request: any) => any, optimized: any, beforeChars: number, afterChars: number): any => {
+  const invokeMeasured = (
+    invoke: (request: any) => any,
+    optimized: any,
+    beforeChars: number,
+    afterChars: number,
+    allowKeepalive = true,
+  ): any => {
     const source = invoke(optimized)
     if (!source || typeof source[Symbol.asyncIterator] !== 'function') return source
     return (async function* () {
       for await (const chunk of source) {
-        observeUsage(chunk, optimized, beforeChars, afterChars, invoke)
+        observeUsage(chunk, optimized, beforeChars, afterChars, invoke, allowKeepalive)
         yield chunk
       }
     })()
   }
-  const runOptimized = (invoke: (request: any) => any, request: any): any => {
+  const runOptimized = (invoke: (request: any) => any, request: any, prepared: boolean): any => {
     const beforeChars = payloadChars(request)
     const transformed = transform(request)
-    // 动态 reasoning effort：只改采样参数，不动 prompt，因此与缓存完全无关。
+    // 动态 reasoning effort：prepared 路径必须在 prepareCall 前修正（见 prepareCallConfig），
+    // 这里只对 direct stream 生效；否则会触发 INVALID_PREPARED_CALL。
     let optimized = transformed
     const effort = options.resolveEffort?.(transformed)
-    if (effort && effort.effort && effort.effort !== (transformed as any)?.reasoningEffort) {
+    if (!prepared && effort && effort.effort && effort.effort !== (transformed as any)?.reasoningEffort) {
       optimized = { ...transformed, reasoningEffort: effort.effort }
     }
     const afterChars = payloadChars(optimized)
     const cache = options.responseCache
-    if (!cache) return invokeMeasured(invoke, optimized, beforeChars, afterChars)
+    if (!cache) return invokeMeasured(invoke, optimized, beforeChars, afterChars, !prepared)
     let key: string
     try {
       key = cache.keyFor(optimized)
     } catch {
-      return invokeMeasured(invoke, optimized, beforeChars, afterChars)
+      return invokeMeasured(invoke, optimized, beforeChars, afterChars, !prepared)
     }
     const hit = cache.get(key)
     if (hit) {
@@ -687,7 +715,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     return (async function* () {
       const chunks: any[] = []
       for await (const chunk of stream) {
-        observeUsage(chunk, optimized, beforeChars, afterChars, invoke)
+        observeUsage(chunk, optimized, beforeChars, afterChars, invoke, !prepared)
         chunks.push(chunk)
         yield chunk
       }
@@ -698,16 +726,17 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   try {
     llm.stream = function patchedStream(this: any, request: any) {
       const self = this
-      return runOptimized((optimized) => originalStream.call(self, optimized), request)
+      return runOptimized((optimized) => originalStream.call(self, optimized), request, false)
     }
     if (typeof originalPrepare === 'function') {
       llm.prepareCall = async function patchedPrepare(this: any, config: any, signal?: any, configure?: any) {
-        const prepared = await originalPrepare.call(this, config, signal, configure)
+        const nextConfig = options.prepareCallConfig ? options.prepareCallConfig(config) : config
+        const prepared = await originalPrepare.call(this, nextConfig, signal, configure)
         if (!prepared || typeof prepared.stream !== 'function') return prepared
         const preparedStream = prepared.stream
         return {
           ...prepared,
-          stream: (request: any) => runOptimized((optimized) => preparedStream.call(prepared, optimized), request),
+          stream: (request: any) => runOptimized((optimized) => preparedStream.call(prepared, optimized), request, true),
         }
       }
     }
