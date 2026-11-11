@@ -55,6 +55,23 @@ export declare function classifyTurn(text: string): {
 };
 /** 最后一条工具结果是否报错（调试步骤需要深度思考）。 */
 export declare function lastToolErrored(messages: unknown): boolean;
+/**
+ * 把 pre-step 观测到的信号拼成最小消息视图，供 decideEffort 复用同一套分类逻辑。
+ *
+ * 不能直接截取最近 N 条消息：一輪里工具步骤可能很多，最后 8 条里往往已经没有
+ * 用户消息，`lastUserText` 会返回空 -> 档位被误判成 normal。
+ */
+export declare function syntheticMessages(input: {
+    userText: string;
+    lastRole: string;
+    toolErrored: boolean;
+}): Array<{
+    role: string;
+    content: Array<{
+        type: 'text';
+        text: string;
+    }>;
+}>;
 /** 最后一条用户消息的文本。 */
 export declare function lastUserText(messages: unknown): string;
 /**

@@ -217,11 +217,12 @@ export interface SchemaCompressorOptions {
    */
   resolveEffort?: (request: any) => { effort: string } | null
   /**
-   * 在 prepareCall 之前修正 call config（provider/model/reasoningEffort/temperature/maxTokens/stop）。
-   * DSH 会冻结 prepare 解析出的 config 并在 dispatch 时做相等校验，因此 effort 必须在这里改，
+   * 在 prepareCall 内、宿主冻结 call config **之前** 修正控制项（reasoningEffort 等）。
+   * DSH 会冻结 prepare 解析出的 config 并在 dispatch 时做相等校验，所以 effort 必须在这里改，
    * 绝不能在 stream 阶段改（会触发 INVALID_PREPARED_CALL）。
+   * 与宿主传入的 configure 组合：先让宿主选，再只做下调。
    */
-  prepareCallConfig?: (config: any) => any
+  configureControls?: (controls: any, model: any) => any
   /**
    * provider 真实 usage 回调（Gate 1）：只有流里真的出现 `usage` chunk 才回调，
    * 并同时给出同一请求压缩前/后的载荷字符数，供 BillingLedger 实测校准。
@@ -511,6 +512,8 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   // 按 session 分开：主 Agent 与多个 subagent 是不同上下文，共用一个槽位会互相顶掉，
   // 保活就只对「最后一个说话的人」生效。同时限制总的会话数，避免一堆 subagent 各自烧保活费。
   const keepaliveSlots = new Map<string, KeepaliveSlot>()
+  /** 每个会话连续保活失败次数；达到阈值就停掉该会话的保活。 */
+  const keepaliveFailures = new Map<string, number>()
   // provider �?cacheReadTokens 是会话累计值（已用宿主日志交叉验证：usage chunk 的原始值
   // 与日志里的累计列完全一致），所有记�?阈值都必须用差分。
   const cacheRead = new CacheReadNormalizer()
@@ -538,7 +541,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     if (disposed || !keepaliveCfg?.enabled) return
     const slot = keepaliveSlots.get(key)
     if (!slot) return
-    if (promptTokens < (keepaliveCfg.minPromptTokens ?? 8000) || slot.remaining <= 0) {
+    if (promptTokens < (keepaliveCfg.minPromptTokens ?? 500) || slot.remaining <= 0) {
       cancelKeepalive(key)
       return
     }
@@ -563,9 +566,13 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     const { invoke, request: optimized } = slot
     let promptTokens = slot.promptTokens
     try {
-      const body: any = { ...optimized, maxTokens: 1, purpose: 'cache-keepalive' }
+      // maxTokens 由各自路径自己决定：direct 直接改 options，prepared 重新 prepare 一个
+      // maxTokens=1 的调用（不能改已冻结的 config）。所以这里只带 purpose。
+      const body: any = { ...optimized, purpose: 'cache-keepalive' }
       delete body.signal
-      const stream = invoke(body)
+      delete body.maxTokens
+      delete body.reasoningEffort
+      const stream = await invoke(body)
       if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return
       let cached = 0
       let fresh = 0
@@ -598,33 +605,41 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
         remaining: slot.remaining,
       })
     } catch (error) {
-      logEvent('warn', 'cache.keepalive_failed', { module: 'Keepalive', error: String(error) })
-      cancelKeepalive(key)
+      // 保活是尽力而为：连续失败两次就对这个会话关掉，避免一直烧钱和刷日志。
+      const failures = (keepaliveFailures.get(key) ?? 0) + 1
+      keepaliveFailures.set(key, failures)
+      logEvent('warn', 'cache.keepalive_failed', {
+        module: 'Keepalive',
+        sessionId: optimized?.sessionId ?? 'unknown',
+        attempts: failures,
+        error: String(error),
+        stack: error instanceof Error ? String(error.stack ?? '').slice(0, 400) : undefined,
+      })
+      if (failures >= 2) {
+        keepaliveFailures.delete(key)
+        cancelKeepalive(key)
+        logEvent('warn', 'cache.keepalive_disabled', {
+          module: 'Keepalive',
+          sessionId: optimized?.sessionId ?? 'unknown',
+          reason: 'repeated failures',
+        })
+      }
       return
     }
     armKeepalive(key, invoke, optimized, promptTokens)
   }
 
-  let keepaliveSkipLogged = false
   const observeUsage = (
     chunk: any,
     optimized: any,
     beforeChars: number,
     afterChars: number,
     invoke: (request: any) => any,
-    allowKeepalive = true,
   ): void => {
     if (chunk?.type !== 'usage' || !chunk.usage) return
     const isKeepalive = optimized?.purpose === 'cache-keepalive'
     const hitDelta = cacheRead.normalize(String(optimized?.sessionId ?? 'default'), chunk.usage.cacheReadTokens ?? 0)
-    if (!isKeepalive && keepaliveCfg?.enabled && !allowKeepalive && !keepaliveSkipLogged) {
-      keepaliveSkipLogged = true
-      logEvent('info', 'cache.keepalive_skipped', {
-        module: 'Keepalive',
-        reason: 'prepared call config is immutable; keepalive never mutates it',
-      })
-    }
-    if (!isKeepalive && keepaliveCfg?.enabled && allowKeepalive) {
+    if (!isKeepalive && keepaliveCfg?.enabled) {
       // 真实请求发出去了：它自己会刷新缓存，先撤掉这个会话挂起的保活。
       const key = String(optimized?.sessionId ?? 'default')
       const existing = keepaliveSlots.get(key)
@@ -661,18 +676,27 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     optimized: any,
     beforeChars: number,
     afterChars: number,
-    allowKeepalive = true,
+    keepaliveInvoke?: (body: any) => any,
   ): any => {
     const source = invoke(optimized)
     if (!source || typeof source[Symbol.asyncIterator] !== 'function') return source
+    const kaInvoke = keepaliveInvoke ?? ((body: any) => invoke({ ...body, maxTokens: 1 }))
     return (async function* () {
       for await (const chunk of source) {
-        observeUsage(chunk, optimized, beforeChars, afterChars, invoke, allowKeepalive)
+        observeUsage(chunk, optimized, beforeChars, afterChars, kaInvoke)
         yield chunk
       }
     })()
   }
   const runOptimized = (invoke: (request: any) => any, request: any, prepared: boolean): any => {
+    /**
+     * 保活必须**自己开一次调用**，绝不能复用 prepared 的 stream：
+     * `prepared.stream` 是单次可派发的句柄，第二次派发会抛
+     * `LlmError: a prepared LLM call can only be dispatched once`（实盘踩到过）。
+     * 这里走宿主原始的 `llm.stream`，由宿主自己 prepare + dispatch，语义上等价于一次
+     * 手搓调用，也不受我们那次 prepared 的冻结配置约束。
+     */
+    const kaInvoke = (body: any) => originalStream.call(llm, { ...body, maxTokens: 1 })
     const beforeChars = payloadChars(request)
     const transformed = transform(request)
     // 动态 reasoning effort：prepared 路径必须在 prepareCall 前修正（见 prepareCallConfig），
@@ -684,12 +708,12 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     }
     const afterChars = payloadChars(optimized)
     const cache = options.responseCache
-    if (!cache) return invokeMeasured(invoke, optimized, beforeChars, afterChars, !prepared)
+    if (!cache) return invokeMeasured(invoke, optimized, beforeChars, afterChars, kaInvoke)
     let key: string
     try {
       key = cache.keyFor(optimized)
     } catch {
-      return invokeMeasured(invoke, optimized, beforeChars, afterChars, !prepared)
+      return invokeMeasured(invoke, optimized, beforeChars, afterChars, kaInvoke)
     }
     const hit = cache.get(key)
     if (hit) {
@@ -715,7 +739,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     return (async function* () {
       const chunks: any[] = []
       for await (const chunk of stream) {
-        observeUsage(chunk, optimized, beforeChars, afterChars, invoke, !prepared)
+        observeUsage(chunk, optimized, beforeChars, afterChars, kaInvoke)
         chunks.push(chunk)
         yield chunk
       }
@@ -730,8 +754,13 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
     }
     if (typeof originalPrepare === 'function') {
       llm.prepareCall = async function patchedPrepare(this: any, config: any, signal?: any, configure?: any) {
-        const nextConfig = options.prepareCallConfig ? options.prepareCallConfig(config) : config
-        const prepared = await originalPrepare.call(this, nextConfig, signal, configure)
+        // 组合宿主的 ConfigureCall：宿主先选，我们再只下调。返回值就是随后被冻结的 config，
+        // 所以 dispatch 时的相等校验必然成立。
+        const composed =
+          typeof options.configureControls === 'function'
+            ? (controls: any, model: any) => options.configureControls!(configure ? configure(controls, model) : controls, model)
+            : configure
+        const prepared = await originalPrepare.call(this, config, signal, composed)
         if (!prepared || typeof prepared.stream !== 'function') return prepared
         const preparedStream = prepared.stream
         return {

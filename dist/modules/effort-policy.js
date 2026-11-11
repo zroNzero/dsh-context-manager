@@ -23,6 +23,7 @@ exports.lastMessageRole = lastMessageRole;
 exports.looksLikeError = looksLikeError;
 exports.classifyTurn = classifyTurn;
 exports.lastToolErrored = lastToolErrored;
+exports.syntheticMessages = syntheticMessages;
 exports.lastUserText = lastUserText;
 exports.decideEffort = decideEffort;
 const RANK = { off: 0, low: 1, high: 2, max: 3 };
@@ -114,6 +115,24 @@ function lastToolErrored(messages) {
         return looksLikeError(text);
     }
     return false;
+}
+/**
+ * 把 pre-step 观测到的信号拼成最小消息视图，供 decideEffort 复用同一套分类逻辑。
+ *
+ * 不能直接截取最近 N 条消息：一輪里工具步骤可能很多，最后 8 条里往往已经没有
+ * 用户消息，`lastUserText` 会返回空 -> 档位被误判成 normal。
+ */
+function syntheticMessages(input) {
+    const messages = [
+        { role: 'user', content: [{ type: 'text', text: input.userText }] },
+    ];
+    if (input.lastRole !== 'user') {
+        messages.push({
+            role: 'tool',
+            content: [{ type: 'text', text: input.toolErrored ? 'Error: previous tool call failed' : 'ok' }],
+        });
+    }
+    return messages;
 }
 /** 最后一条用户消息的文本。 */
 function lastUserText(messages) {

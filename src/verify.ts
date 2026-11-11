@@ -785,6 +785,85 @@ async function main(): Promise<void> {
     assert(captured[3].reasoningEffort === 'low', `must never raise above the host request, got ${captured[3].reasoningEffort}`)
   })
 
+  await check('prepared path: effort frozen before dispatch, keepalive opens its own call', async () => {
+    // 复刻 DSH 的真实约束：prepareCall 冻结 config，dispatch 时严格比较；不一致即
+    // INVALID_PREPARED_CALL。旧实现把 effort 改在 stream 阶段，整轮直接失败。
+    const preparedConfigs: any[] = []
+    const dispatched: any[] = []
+    const direct: any[] = []
+    const llm: any = {
+      // installSchemaCompressor 要求 llm.stream 存在才会安装钩子；保活走的就是它。
+      stream(request: any) {
+        direct.push(request)
+        return (async function* () {
+          yield { type: 'usage', usage: { inputTokens: 200, cacheReadTokens: 2400, outputTokens: 10 } }
+        })()
+      },
+      async prepareCall(config: any, _signal?: any, configure?: any) {
+        const model = { reasoning: { efforts: [{ id: 'off' }, { id: 'low' }, { id: 'high' }, { id: 'max' }], defaultEffort: 'high' } }
+        const controls = configure ? configure({ ...config }, model) : config
+        const frozen = { ...config, ...controls }
+        preparedConfigs.push(frozen)
+        return {
+          config: frozen,
+          adapterDefaults: {},
+          stream(options: any) {
+            for (const key of ['provider', 'model', 'reasoningEffort', 'maxTokens'] as const) {
+              const a = frozen[key]
+              const b = options[key]
+              if (a !== undefined && b !== undefined && a !== b) {
+                throw new Error(`INVALID_PREPARED_CALL ${key}: ${a} != ${b}`)
+              }
+            }
+            dispatched.push(options)
+            return (async function* () {
+              yield { type: 'text-delta', index: 0, text: 'ok' }
+              yield { type: 'usage', usage: { inputTokens: 300, cacheReadTokens: 2000, outputTokens: 100 } }
+            })()
+          },
+        }
+      },
+    }
+    const dispose = installSchemaCompressor({ llm } as any, {
+      enabled: true,
+      configureControls: (controls: any) => ({ ...controls, reasoningEffort: 'low' }),
+      keepalive: { enabled: true, ttlMs: 30, refreshes: 1, minPromptTokens: 100, marginRatio: 0.5, minDelayMs: 15 },
+    })
+    try {
+      const prepared = await llm.prepareCall({ provider: 'p', model: 'm', reasoningEffort: 'max', maxTokens: 4096 })
+      assert(prepared.config.reasoningEffort === 'low', `effort must be frozen before dispatch, got ${prepared.config.reasoningEffort}`)
+
+      // 这个宿主校验必须是真的，否则下面的保证是空的
+      let rejected = false
+      try {
+        const bad = prepared.stream({ provider: 'p', model: 'm', reasoningEffort: 'max', maxTokens: 4096, messages: [] })
+        for await (const _chunk of bad) {
+          /* drain */
+        }
+      } catch {
+        rejected = true
+      }
+      assert(rejected, 'fake host must reject a config/dispatch mismatch, otherwise the guard is vacuous')
+
+      // 正常调用不携带 effort/maxTokens 覆盖，不会触发不一致
+      for await (const _chunk of prepared.stream({ provider: 'p', model: 'm', messages: [] })) {
+        /* drain */
+      }
+      assert(dispatched.length === 1, `normal dispatch must succeed exactly once, got ${dispatched.length}`)
+
+      // 保活必须自己开一次调用（走原始 llm.stream），不能复用单次可派发的 prepared stream
+      await new Promise((resolve) => setTimeout(resolve, 90))
+      const ka = direct.filter((request) => request.maxTokens === 1)
+      assert(ka.length >= 1, 'keepalive must dispatch its own maxTokens=1 call')
+      assert(
+        preparedConfigs.filter((config) => config.maxTokens === 1).length === 0,
+        'keepalive must not re-prepare or reuse the one-shot prepared call',
+      )
+    } finally {
+      dispose()
+    }
+  })
+
   await check('response cache replays identical request', async () => {
     const ctx6: any = { systemPrompt: { section: () => () => {} }, tools: { register: () => () => {} }, on: () => () => {} }
     let calls = 0

@@ -30,7 +30,7 @@ import { runExtraction, buildFirewallSummary } from './modules/extraction'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { hasCrossFileDependency, RoutingModule } from './modules/routing'
 import { collectGarbage } from './modules/spill-gc'
-import { decideEffort } from './modules/effort-policy'
+import { decideEffort, looksLikeError, syntheticMessages } from './modules/effort-policy'
 import { installSchemaCompressor } from './modules/schema-index'
 import { CompressionBreaker } from './modules/breaker'
 import { DedupBus, dedupeKey } from './modules/dedup-bus'
@@ -419,8 +419,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
   // 会话 -> 工作区映射：schema 压缩发生在 llm 层，只能靠 sessionId 反查。
   const sessionWorkspaces = new Map<string, WorkspaceRef>()
-  /** 最近一次 pre-step 的消息视图，供 prepareCall 前判定 reasoning effort。 */
-  let effortMessages: any[] | null = null
+  /** 最近一次 pre-step 的观测信号，供 prepareCall 前判定 reasoning effort。 */
+  let effortContext: { userText: string; lastRole: string; toolErrored: boolean } | null = null
   const liveSession = (sessionId: string, fallback: any): any => {
     try {
       const store = (services as any).sessions
@@ -603,11 +603,16 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       onCacheHit: () => logEvent('info', 'cache.response_hit', responseCache.stats()),
       onSemanticHit: (score: number) => logEvent('info', 'cache.semantic_hit', { score, ...responseCache.stats() }),
       outputGuard: { enabled: config.outputGuardEnabled, maxTokens: config.outputMaxTokens },
-      prepareCallConfig: (callConfig: any) => {
-        if (!config.dynamicEffortEnabled || effortMessages === null) return callConfig
-        const requested = callConfig?.reasoningEffort
+      /**
+       * reasoning effort 必须在宿主冻结 call config **之前** 改。
+       * 用的就是宿主自己的 `ConfigureCall` 钩子（prepareCall 的第三个参数），
+       * 而不是事后改 request —— 后者会触发 INVALID_PREPARED_CALL。
+       */
+      configureControls: (controls: any, model: any) => {
+        if (!config.dynamicEffortEnabled || effortContext === null) return controls
+        const requested = controls?.reasoningEffort ?? model?.reasoning?.defaultEffort
         const decision = decideEffort({
-          messages: effortMessages,
+          messages: syntheticMessages(effortContext),
           requested,
           policy: {
             enabled: config.dynamicEffortEnabled,
@@ -618,10 +623,10 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
             escalateOnError: config.effortEscalateOnError,
           },
         })
-        if (!decision.effort || decision.effort === decision.requested) return callConfig
+        if (!decision.effort || decision.effort === decision.requested) return controls
         logEvent('info', 'effort.decided', {
           module: 'EffortPolicy',
-          scope: 'prepareCall',
+          scope: 'configureCall',
           tier: decision.tier,
           from: decision.requested,
           to: decision.effort,
@@ -629,7 +634,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
           reason: decision.reason,
           escalated: decision.escalated,
         })
-        return { ...callConfig, reasoningEffort: decision.effort }
+        return { ...controls, reasoningEffort: decision.effort }
       },
       resolveEffort: (request: any) => {
         const requested = request?.reasoningEffort ?? request?.config?.reasoningEffort
@@ -936,10 +941,24 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
       const entries = collectEntries(live)
       if (entries.length === 0) return downstream
-      effortMessages = entries.slice(-8).map((entry) => ({
-        role: entry.role,
-        content: [{ type: 'text', text: entry.text }],
-      }))
+      // 按信号记录，而不是截取最近 N 条消息：多步工具调用后最近的消息里往往没有
+      // 用户消息，靠它判档位会退化成 normal。这里显式回溯最后一条用户消息。
+      {
+        const last = entries[entries.length - 1]
+        let userText = ''
+        for (let index = entries.length - 1; index >= 0; index -= 1) {
+          if (entries[index].role === 'user') {
+            userText = entries[index].text
+            break
+          }
+        }
+        const tailText = String(last?.text ?? '')
+        effortContext = {
+          userText,
+          lastRole: String(last?.role ?? ''),
+          toolErrored: last?.role === 'tool' ? looksLikeError(tailText) : false,
+        }
+      }
 
       const workspace = workspaceFor(live, payload?.agent)
       if (!sessionWorkspaces.has(sessionId)) {

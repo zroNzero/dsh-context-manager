@@ -399,6 +399,8 @@ function installSchemaCompressor(ctx, options = {}) {
     // 按 session 分开：主 Agent 与多个 subagent 是不同上下文，共用一个槽位会互相顶掉，
     // 保活就只对「最后一个说话的人」生效。同时限制总的会话数，避免一堆 subagent 各自烧保活费。
     const keepaliveSlots = new Map();
+    /** 每个会话连续保活失败次数；达到阈值就停掉该会话的保活。 */
+    const keepaliveFailures = new Map();
     // provider �?cacheReadTokens 是会话累计值（已用宿主日志交叉验证：usage chunk 的原始值
     // 与日志里的累计列完全一致），所有记�?阈值都必须用差分。
     const cacheRead = new billing_js_1.CacheReadNormalizer();
@@ -426,7 +428,7 @@ function installSchemaCompressor(ctx, options = {}) {
         const slot = keepaliveSlots.get(key);
         if (!slot)
             return;
-        if (promptTokens < (keepaliveCfg.minPromptTokens ?? 8000) || slot.remaining <= 0) {
+        if (promptTokens < (keepaliveCfg.minPromptTokens ?? 500) || slot.remaining <= 0) {
             cancelKeepalive(key);
             return;
         }
@@ -452,9 +454,13 @@ function installSchemaCompressor(ctx, options = {}) {
         const { invoke, request: optimized } = slot;
         let promptTokens = slot.promptTokens;
         try {
-            const body = { ...optimized, maxTokens: 1, purpose: 'cache-keepalive' };
+            // maxTokens 由各自路径自己决定：direct 直接改 options，prepared 重新 prepare 一个
+            // maxTokens=1 的调用（不能改已冻结的 config）。所以这里只带 purpose。
+            const body = { ...optimized, purpose: 'cache-keepalive' };
             delete body.signal;
-            const stream = invoke(body);
+            delete body.maxTokens;
+            delete body.reasoningEffort;
+            const stream = await invoke(body);
             if (!stream || typeof stream[Symbol.asyncIterator] !== 'function')
                 return;
             let cached = 0;
@@ -491,26 +497,35 @@ function installSchemaCompressor(ctx, options = {}) {
             });
         }
         catch (error) {
-            (0, log_1.logEvent)('warn', 'cache.keepalive_failed', { module: 'Keepalive', error: String(error) });
-            cancelKeepalive(key);
+            // 保活是尽力而为：连续失败两次就对这个会话关掉，避免一直烧钱和刷日志。
+            const failures = (keepaliveFailures.get(key) ?? 0) + 1;
+            keepaliveFailures.set(key, failures);
+            (0, log_1.logEvent)('warn', 'cache.keepalive_failed', {
+                module: 'Keepalive',
+                sessionId: optimized?.sessionId ?? 'unknown',
+                attempts: failures,
+                error: String(error),
+                stack: error instanceof Error ? String(error.stack ?? '').slice(0, 400) : undefined,
+            });
+            if (failures >= 2) {
+                keepaliveFailures.delete(key);
+                cancelKeepalive(key);
+                (0, log_1.logEvent)('warn', 'cache.keepalive_disabled', {
+                    module: 'Keepalive',
+                    sessionId: optimized?.sessionId ?? 'unknown',
+                    reason: 'repeated failures',
+                });
+            }
             return;
         }
         armKeepalive(key, invoke, optimized, promptTokens);
     };
-    let keepaliveSkipLogged = false;
-    const observeUsage = (chunk, optimized, beforeChars, afterChars, invoke, allowKeepalive = true) => {
+    const observeUsage = (chunk, optimized, beforeChars, afterChars, invoke) => {
         if (chunk?.type !== 'usage' || !chunk.usage)
             return;
         const isKeepalive = optimized?.purpose === 'cache-keepalive';
         const hitDelta = cacheRead.normalize(String(optimized?.sessionId ?? 'default'), chunk.usage.cacheReadTokens ?? 0);
-        if (!isKeepalive && keepaliveCfg?.enabled && !allowKeepalive && !keepaliveSkipLogged) {
-            keepaliveSkipLogged = true;
-            (0, log_1.logEvent)('info', 'cache.keepalive_skipped', {
-                module: 'Keepalive',
-                reason: 'prepared call config is immutable; keepalive never mutates it',
-            });
-        }
-        if (!isKeepalive && keepaliveCfg?.enabled && allowKeepalive) {
+        if (!isKeepalive && keepaliveCfg?.enabled) {
             // 真实请求发出去了：它自己会刷新缓存，先撤掉这个会话挂起的保活。
             const key = String(optimized?.sessionId ?? 'default');
             const existing = keepaliveSlots.get(key);
@@ -544,18 +559,27 @@ function installSchemaCompressor(ctx, options = {}) {
         }
     };
     /** 在透传 chunk 的同时把 provider usage 交给真实账本；不改动流本身。 */
-    const invokeMeasured = (invoke, optimized, beforeChars, afterChars, allowKeepalive = true) => {
+    const invokeMeasured = (invoke, optimized, beforeChars, afterChars, keepaliveInvoke) => {
         const source = invoke(optimized);
         if (!source || typeof source[Symbol.asyncIterator] !== 'function')
             return source;
+        const kaInvoke = keepaliveInvoke ?? ((body) => invoke({ ...body, maxTokens: 1 }));
         return (async function* () {
             for await (const chunk of source) {
-                observeUsage(chunk, optimized, beforeChars, afterChars, invoke, allowKeepalive);
+                observeUsage(chunk, optimized, beforeChars, afterChars, kaInvoke);
                 yield chunk;
             }
         })();
     };
     const runOptimized = (invoke, request, prepared) => {
+        /**
+         * 保活必须**自己开一次调用**，绝不能复用 prepared 的 stream：
+         * `prepared.stream` 是单次可派发的句柄，第二次派发会抛
+         * `LlmError: a prepared LLM call can only be dispatched once`（实盘踩到过）。
+         * 这里走宿主原始的 `llm.stream`，由宿主自己 prepare + dispatch，语义上等价于一次
+         * 手搓调用，也不受我们那次 prepared 的冻结配置约束。
+         */
+        const kaInvoke = (body) => originalStream.call(llm, { ...body, maxTokens: 1 });
         const beforeChars = payloadChars(request);
         const transformed = transform(request);
         // 动态 reasoning effort：prepared 路径必须在 prepareCall 前修正（见 prepareCallConfig），
@@ -568,13 +592,13 @@ function installSchemaCompressor(ctx, options = {}) {
         const afterChars = payloadChars(optimized);
         const cache = options.responseCache;
         if (!cache)
-            return invokeMeasured(invoke, optimized, beforeChars, afterChars, !prepared);
+            return invokeMeasured(invoke, optimized, beforeChars, afterChars, kaInvoke);
         let key;
         try {
             key = cache.keyFor(optimized);
         }
         catch {
-            return invokeMeasured(invoke, optimized, beforeChars, afterChars, !prepared);
+            return invokeMeasured(invoke, optimized, beforeChars, afterChars, kaInvoke);
         }
         const hit = cache.get(key);
         if (hit) {
@@ -600,7 +624,7 @@ function installSchemaCompressor(ctx, options = {}) {
         return (async function* () {
             const chunks = [];
             for await (const chunk of stream) {
-                observeUsage(chunk, optimized, beforeChars, afterChars, invoke, !prepared);
+                observeUsage(chunk, optimized, beforeChars, afterChars, kaInvoke);
                 chunks.push(chunk);
                 yield chunk;
             }
@@ -614,8 +638,12 @@ function installSchemaCompressor(ctx, options = {}) {
         };
         if (typeof originalPrepare === 'function') {
             llm.prepareCall = async function patchedPrepare(config, signal, configure) {
-                const nextConfig = options.prepareCallConfig ? options.prepareCallConfig(config) : config;
-                const prepared = await originalPrepare.call(this, nextConfig, signal, configure);
+                // 组合宿主的 ConfigureCall：宿主先选，我们再只下调。返回值就是随后被冻结的 config，
+                // 所以 dispatch 时的相等校验必然成立。
+                const composed = typeof options.configureControls === 'function'
+                    ? (controls, model) => options.configureControls(configure ? configure(controls, model) : controls, model)
+                    : configure;
+                const prepared = await originalPrepare.call(this, config, signal, composed);
                 if (!prepared || typeof prepared.stream !== 'function')
                     return prepared;
                 const preparedStream = prepared.stream;

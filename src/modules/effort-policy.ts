@@ -127,9 +127,31 @@ export function lastToolErrored(messages: unknown): boolean {
   return false
 }
 
+/**
+ * 把 pre-step 观测到的信号拼成最小消息视图，供 decideEffort 复用同一套分类逻辑。
+ *
+ * 不能直接截取最近 N 条消息：一輪里工具步骤可能很多，最后 8 条里往往已经没有
+ * 用户消息，`lastUserText` 会返回空 -> 档位被误判成 normal。
+ */
+export function syntheticMessages(input: {
+  userText: string
+  lastRole: string
+  toolErrored: boolean
+}): Array<{ role: string; content: Array<{ type: 'text'; text: string }> }> {
+  const messages: Array<{ role: string; content: Array<{ type: 'text'; text: string }> }> = [
+    { role: 'user', content: [{ type: 'text', text: input.userText }] },
+  ]
+  if (input.lastRole !== 'user') {
+    messages.push({
+      role: 'tool',
+      content: [{ type: 'text', text: input.toolErrored ? 'Error: previous tool call failed' : 'ok' }],
+    })
+  }
+  return messages
+}
+
 /** 最后一条用户消息的文本。 */
-export function lastUserText(messages: unknown): string {
-  if (!Array.isArray(messages)) return ''
+export function lastUserText(messages: unknown): string {  if (!Array.isArray(messages)) return ''
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message: any = messages[i]
     if (message?.role !== 'user') continue
