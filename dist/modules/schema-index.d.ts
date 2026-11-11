@@ -59,6 +59,8 @@ export interface SchemaCompressorOptions {
         beforeTokens: number;
         afterTokens: number;
         savedTokens: number;
+        toolsBeforeTokens: number;
+        toolsAfterTokens: number;
     }) => void;
 }
 /**

@@ -38,23 +38,33 @@ export function workspaceRef(input: string | undefined | null): WorkspaceRef {
   return { id, path: normalized, label }
 }
 
+/** 安全读取：cordis ctx 代理对未 inject 的服务属性会抛错，必须逐项捕获。 */
+function readString(getter: () => unknown): string | null {
+  try {
+    const value = getter()
+    return typeof value === 'string' && value.trim().length > 0 ? value : null
+  } catch {
+    return null
+  }
+}
+
 /** 从会话/代理对象上尽量解析工作目录；找不到返回 null（由调用方决定 fallback）。 */
 export function resolveSessionWorkspace(session: any, agent?: any): string | null {
-  const candidates: unknown[] = [
-    session?.cwd,
-    session?.header?.cwd,
-    session?.meta?.cwd,
-    session?.info?.cwd,
-    session?.workspace,
-    session?.workspacePath,
-    session?.projectRoot,
-    session?.options?.cwd,
-    agent?.options?.cwd,
-    agent?.loopCtx?.options?.cwd,
-    agent?.session?.header?.cwd,
+  const candidates: Array<() => unknown> = [
+    () => session?.cwd,
+    () => session?.header?.cwd,
+    () => session?.meta?.cwd,
+    () => session?.info?.cwd,
+    () => session?.workspace,
+    () => session?.workspacePath,
+    () => session?.projectRoot,
+    () => session?.options?.cwd,
+    () => agent?.session?.header?.cwd,
+    () => agent?.session?.cwd,
   ]
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim().length > 0) return candidate
+  for (const getter of candidates) {
+    const value = readString(getter)
+    if (value !== null) return value
   }
   return null
 }

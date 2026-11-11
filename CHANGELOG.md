@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.0.12 — 2026-11-11
+
+### 恢复 hook 链路 + 工作区解析 + 每维压缩率（schemaVersion 5）
+
+- **修复 hook 全挂**：`workspace.ts` 在 cordis 代理上读取 `agent.options` 会抛
+  `cannot get property "options" without inject`，导致 pre-step / post-execute
+  整段被 catch 吞掉（线上 380 次失败、压缩全停）。现在所有代理属性访问逐项
+  `try/catch`；schema 安装同样加保护；新增
+  `workspace.safe-proxy`（self-test）与 `hooks survive opaque agent proxy`（verify）。
+- **workspace 解析**：优先 `ctx.sessions.get(id)`，取不到时
+  `sessions.list().find(header.id)` 兜底；hook 收到字符串 sessionId 时也能解析；
+  保留 `workspace.resolved` / `workspace.unresolved` 日志（含 hookCwd / storeCwd）。
+- **每维压缩率**：`savings.json` 升到 `schemaVersion: 5`，顶层与每个工作区新增
+  `byModuleBefore`（每模块原始 token）；面板用 `byModule / byModuleBefore` 算每维比例。
+  `fold` 也记录 before，面板可自行决定是否展示。
+- 旧字段全部保留；`self-test 8/8`、`verify 14/14`。
+
 ## v1.0.11 — 2026-11-10
 
 ### 工作区解析与压缩触发

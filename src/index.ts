@@ -314,9 +314,16 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   const liveSession = (sessionId: string, fallback: any): any => {
     try {
       const store = (services as any).sessions
-      if (store && typeof store.get === 'function') {
+      if (!store) return fallback
+      if (typeof store.get === 'function') {
         const fromStore = store.get(sessionId)
         if (fromStore) return fromStore
+      }
+      if (typeof store.list === 'function') {
+        const listed = store.list()
+        const items = Array.isArray(listed) ? listed : Array.from(listed ?? [])
+        const found = items.find((item: any) => item?.header?.id === sessionId || item?.id === sessionId)
+        if (found) return found
       }
     } catch {
       /* 服务不可用时回退到 hook 传入的实例 */
@@ -384,10 +391,12 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     const dispose = installSchemaCompressor({ llm, get: () => undefined } as any, {
       enabled: true,
       maxDescriptionChars: 120,
-      onRequest: ({ sessionId, beforeTokens, afterTokens, savedTokens }) => {
+      onRequest: ({ sessionId, beforeTokens, afterTokens, savedTokens, toolsBeforeTokens }) => {
         const workspace = sessionWorkspaces.get(sessionId) ?? workspaceRef('(unknown)')
         ledger.recordRequestTokens(workspace, beforeTokens, afterTokens)
-        if (savedTokens > 0) ledger.record('schema', savedTokens, 'tool schema descriptions', workspace)
+        if (savedTokens > 0) {
+          ledger.record('schema', savedTokens, 'tool schema descriptions', workspace, toolsBeforeTokens)
+        }
         scheduleSavings()
       },
     })
@@ -420,7 +429,12 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
   const installSchemaFromAgent = (agent: any): void => {
     if (schemaDisposer !== null || !agent) return
-    const llm = agent?.loopCtx?.llm ?? agent?.llm ?? agent?.ctx?.llm
+    let llm: any
+    try {
+      llm = agent?.loopCtx?.llm ?? agent?.llm ?? agent?.ctx?.llm
+    } catch {
+      return
+    }
     if (llm) installSchema(llm, 'agent')
   }
 
@@ -431,16 +445,28 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       const content = decision.content ?? result?.content
       const text = flattenPlainText(content)
       if (text === undefined) return decision
-      const execSession = exec?.agent?.session
-      const execSessionId = String(execSession?.id ?? exec?.agent?.sessionId ?? '')
-      const workspace = workspaceFor(execSessionId ? liveSession(execSessionId, execSession) : execSession, exec?.agent)
+      let execSession: any
+      try {
+        execSession = exec?.agent?.session
+      } catch {
+        execSession = undefined
+      }
+      const execSessionId = String(
+        (execSession && typeof execSession === 'object' && execSession.id) ||
+          (typeof execSession === 'string' ? execSession : '') ||
+          '',
+      )
+      const workspace = workspaceFor(
+        execSessionId ? liveSession(execSessionId, typeof execSession === 'object' ? execSession : undefined) : undefined,
+        exec?.agent,
+      )
 
       // 去重总线：同一输出第二次出现时只留指针（最常见的是重复跑测试/构建/目录列表）。
       const dedupKeyValue = dedupeKey(text)
       const dedupHit = dedup.hit(dedupKeyValue)
       if (dedupHit !== null && estimateTokens(text) > 100) {
         counters.deduped += 1
-        ledger.record('dedup', dedupHit.entry.tokens, 'duplicate tool output', workspace)
+        ledger.record('dedup', dedupHit.entry.tokens, 'duplicate tool output', workspace, dedupHit.entry.tokens)
         scheduleSavings()
         logEvent('info', 'dedup.hit', {
           module: 'DedupBus',
@@ -505,7 +531,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
       if (saved > 0) {
         const module = extracted && extracted.safe && extracted.mode !== 'none' ? 'extraction' : 'admission'
-        ledger.record(module, saved, `${extracted?.mode ?? 'admission'} ${tokensBefore}->${tokensAfter}`, workspace)
+        ledger.record(module, saved, `${extracted?.mode ?? 'admission'} ${tokensBefore}->${tokensAfter}`, workspace, tokensBefore)
         scheduleSavings()
       }
 
@@ -535,24 +561,47 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     try {
       if (!downstream || downstream.kind === 'reject') return downstream
       installSchemaFromAgent(payload?.agent)
-      const session = payload?.agent?.session
-      if (!session || typeof session.deriveMessages !== 'function') return downstream
+      let sessionRef: any
+      try {
+        sessionRef = payload?.agent?.session
+      } catch {
+        sessionRef = undefined
+      }
+      const sessionId = String(
+        (sessionRef && typeof sessionRef === 'object' && sessionRef.id) ||
+          (typeof sessionRef === 'string' ? sessionRef : '') ||
+          'unknown',
+      )
+      const live = liveSession(sessionId, typeof sessionRef === 'object' ? sessionRef : undefined)
+      if (!live || typeof live.deriveMessages !== 'function') return downstream
 
-      const entries = collectEntries(session)
+      const entries = collectEntries(live)
       if (entries.length === 0) return downstream
 
-      const sessionId = String(session.id ?? 'unknown')
-      const live = liveSession(sessionId, session)
       const workspace = workspaceFor(live, payload?.agent)
       if (!sessionWorkspaces.has(sessionId)) {
         sessionWorkspaces.set(sessionId, workspace)
+        const hookCwd = (() => {
+          try {
+            return String((sessionRef as any)?.cwd ?? '')
+          } catch {
+            return ''
+          }
+        })()
+        const storeCwd = (() => {
+          try {
+            return String((live as any)?.header?.cwd ?? '')
+          } catch {
+            return ''
+          }
+        })()
         logEvent('info', workspace.path === '(unknown)' ? 'workspace.unresolved' : 'workspace.resolved', {
           sessionId,
           workspace: workspace.path,
           workspaceId: workspace.id,
           label: workspace.label,
-          hookCwd: String((session as any)?.cwd ?? ''),
-          storeCwd: String((live as any)?.header?.cwd ?? ''),
+          hookCwd,
+          storeCwd,
         })
       }
       const state = stateFor(sessionId)
@@ -665,10 +714,10 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       const nextEnvelope = applyPatch(envelope, plan.patch)
       if (nextEnvelope.ledger.savedByCompression <= 0) return downstream
 
-      applyFoldToSurface(session, plan.patch, plan.summary, plan.foldedSeqs)
+      applyFoldToSurface(live, plan.patch, plan.summary, plan.foldedSeqs)
       state.folds += 1
       counters.folds += 1
-      ledger.record('fold', plan.tokensSaved, decision.patchId, workspace)
+      ledger.record('fold', plan.tokensSaved, decision.patchId, workspace, plan.tokensBefore)
       ledger.noteFold(workspace)
       scheduleSavings()
 

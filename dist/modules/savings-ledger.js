@@ -1,6 +1,9 @@
 "use strict";
 /**
- * SavingsLedger —— Token 节省账本（面板数据源，schemaVersion 4）。
+ * SavingsLedger —— Token 节省账本（面板数据源，schemaVersion 5）。
+ *
+ * v5 新增：
+ * - byModuleBefore：每个模块的「原始大小」，供面板计算每维压缩率；只加字段。
  *
  * v4 新增（向后兼容，只加字段）：
  * - byWorkspace：按会话工作区分账，workspaceId 是规范化路径的稳定短 hash；
@@ -34,6 +37,7 @@ class SavingsLedger {
             agg = {
                 ref,
                 byModule: emptyModuleRecord(),
+                byModuleBefore: emptyModuleRecord(),
                 events: 0,
                 folds: 0,
                 tokensBefore: 0,
@@ -44,13 +48,15 @@ class SavingsLedger {
         }
         return agg;
     }
-    record(module, tokens, detail = '', workspace) {
+    record(module, tokens, detail = '', workspace, beforeTokens) {
         const value = Math.max(0, Math.round(tokens));
         if (value <= 0)
             return;
+        const before = Math.max(value, Math.round(beforeTokens ?? value));
         const ref = workspace ?? UNKNOWN_WORKSPACE;
         const agg = this.aggFor(ref);
         agg.byModule[module] += value;
+        agg.byModuleBefore[module] += before;
         agg.events += 1;
         agg.updatedAt = Date.now();
         this.revision += 1;
@@ -91,6 +97,7 @@ class SavingsLedger {
     snapshot() {
         const byWorkspace = {};
         const byModule = emptyModuleRecord();
+        const byModuleBefore = emptyModuleRecord();
         let totalSavedTokens = 0;
         let events = 0;
         let folds = 0;
@@ -109,6 +116,7 @@ class SavingsLedger {
                 eventSavings,
                 contextReduction: agg.byModule.fold,
                 byModule: { ...agg.byModule },
+                byModuleBefore: { ...agg.byModuleBefore },
                 events: agg.events,
                 folds: agg.folds,
                 tokensBeforeTotal: agg.tokensBefore,
@@ -120,19 +128,22 @@ class SavingsLedger {
             folds += agg.folds;
             tokensBeforeTotal += agg.tokensBefore;
             tokensAfterTotal += agg.tokensAfter;
-            for (const key of Object.keys(byModule))
+            for (const key of Object.keys(byModule)) {
                 byModule[key] += agg.byModule[key];
+                byModuleBefore[key] += agg.byModuleBefore[key];
+            }
         }
         const eventSavings = byModule.admission + byModule.extraction + byModule.dedup;
         const estimatedCostTokens = Math.round((byModule.schema * CACHE_HIT_PRICE) / CACHE_MISS_PRICE) + eventSavings;
         return {
-            schemaVersion: 4,
+            schemaVersion: 5,
             ledgerId: this.ledgerId,
             revision: this.revision,
             startedAt: new Date(this.startedAt).toISOString(),
             updatedAt: new Date(this.updatedAt).toISOString(),
             totalSavedTokens,
             byModule,
+            byModuleBefore,
             perRequestSavings: byModule.schema,
             eventSavings,
             contextReduction: byModule.fold,
@@ -151,7 +162,12 @@ class SavingsLedger {
     renderMarkdown() {
         const snapshot = this.snapshot();
         const moduleRows = Object.keys(snapshot.byModule)
-            .map((key) => `| ${key} | ${snapshot.byModule[key]} |`)
+            .map((key) => {
+            const saved = snapshot.byModule[key];
+            const before = snapshot.byModuleBefore[key];
+            const rate = before > 0 ? `${((saved / before) * 100).toFixed(1)}%` : '-';
+            return `| ${key} | ${saved} | ${before} | ${rate} |`;
+        })
             .join('\n');
         const workspaceRows = Object.values(snapshot.byWorkspace)
             .map((workspace) => `| ${workspace.label} | ${workspace.totalSavedTokens} | ${workspace.estimatedCostTokens} | ${workspace.events} |`)
@@ -183,8 +199,8 @@ class SavingsLedger {
             '',
             '## By module',
             '',
-            '| module | tokens saved |',
-            '|---|---:|',
+            '| module | tokens saved | before | rate |',
+            '|---|---:|---:|---:|',
             moduleRows,
             '',
             '## By workspace',

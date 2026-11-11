@@ -152,7 +152,14 @@ export interface SchemaCompressorOptions {
   /** 每次压缩成功后回调节省的 token（用于 SavingsLedger）。 */
   onSavings?: (tokens: number) => void
   /** 每次请求回调 prompt token 的压缩前/后统计（用于面板比例）。 */
-  onRequest?: (event: { sessionId: string; beforeTokens: number; afterTokens: number; savedTokens: number }) => void
+  onRequest?: (event: {
+    sessionId: string
+    beforeTokens: number
+    afterTokens: number
+    savedTokens: number
+    toolsBeforeTokens: number
+    toolsAfterTokens: number
+  }) => void
 }
 
 /** 粗略估算消息侧 token（4 字符/token），用于面板比例的分母。 */
@@ -206,6 +213,8 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
           beforeTokens: messagesTokens,
           afterTokens: messagesTokens,
           savedTokens: 0,
+          toolsBeforeTokens: 0,
+          toolsAfterTokens: 0,
         })
         return request
       }
@@ -221,11 +230,15 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
       }
 
       const compressed = compressToolSchemas(tools, maxChars)
+      const toolsBeforeTokens = Math.ceil(toolsBeforeChars / 4)
+      const toolsAfterTokens = Math.ceil(JSON.stringify(compressed.tools).length / 4)
       options.onRequest?.({
         sessionId: String(request.sessionId ?? ''),
-        beforeTokens: messagesTokens + Math.ceil(toolsBeforeChars / 4),
-        afterTokens: messagesTokens + Math.ceil(JSON.stringify(compressed.tools).length / 4),
+        beforeTokens: messagesTokens + toolsBeforeTokens,
+        afterTokens: messagesTokens + toolsAfterTokens,
         savedTokens: compressed.stats.tokensSaved,
+        toolsBeforeTokens,
+        toolsAfterTokens,
       })
       if (compressed.stats.changed === 0 && hidden.length === 0) return request
       options.onSavings?.(compressed.stats.tokensSaved)

@@ -330,6 +330,18 @@ async function main() {
         assert(startSeq === firstTextSeq, `fold must start at first text message (${firstTextSeq}), got ${startSeq}`);
         assert(startSeq !== toolCallSeq, 'fold must never widen into the tool-call assistant');
     });
+    await check('hooks survive opaque agent proxy', async () => {
+        const throwing = new Proxy({}, {
+            get() {
+                throw new Error('cannot get property "options" without inject');
+            },
+        });
+        const pre = hooks.get('agent/pre-step');
+        const post = hooks.get('tools/post-execute');
+        await pre({ agent: throwing, turn: 1, step: 1, messages: [] }, async () => ({ kind: 'enter', messages: [] }));
+        const decision = await post({ tool: { name: 'pwsh' }, agent: throwing }, { content: [{ type: 'text', text: 'x'.repeat(2000) }] }, async () => ({ kind: 'accept', content: [{ type: 'text', text: 'x'.repeat(2000) }] }));
+        assert(decision?.kind === 'accept', 'post-execute must not throw with opaque agent');
+    });
     await check('no console.log in sources', () => {
         const dir = node_path_1.default.resolve('src');
         const offenders = [];

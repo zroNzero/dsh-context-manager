@@ -82,6 +82,11 @@ flowchart LR
 - **按工作区分账**：`byWorkspace[workspaceId]` 给出每个工作区的同类统计
   （`workspace` 路径、`label`、各模块、`events`、`tokensBeforeTotal/AfterTotal`）。
   `workspaceId` 是规范化绝对路径的稳定短 hash；顶层字段等于各工作区之和。
+  工作区从 `ctx.sessions.get(id)?.header?.cwd`（取不到时 `list()` 兜底）解析，
+  不使用 `process.cwd()`。
+- **每维压缩率**：`byModuleBefore[module]` 是同一口径下的原始 token；
+  消费方用 `byModule[module] / byModuleBefore[module]` 得到该维比例
+  （`fold` 也可算，缺省显示 `-`）。
 - **比例分母**：`tokensBeforeTotal / tokensAfterTotal` 是每次请求 prompt token 的累计
   （压缩前/后），消费方用 `1 - after/before` 算比例；当前只覆盖 schema 维度，
   因此带 `tokensBeforeTotalEstimated: true`。

@@ -183,6 +183,8 @@ function installSchemaCompressor(ctx, options = {}) {
                     beforeTokens: messagesTokens,
                     afterTokens: messagesTokens,
                     savedTokens: 0,
+                    toolsBeforeTokens: 0,
+                    toolsAfterTokens: 0,
                 });
                 return request;
             }
@@ -195,11 +197,15 @@ function installSchemaCompressor(ctx, options = {}) {
                 hidden = selected.hidden;
             }
             const compressed = compressToolSchemas(tools, maxChars);
+            const toolsBeforeTokens = Math.ceil(toolsBeforeChars / 4);
+            const toolsAfterTokens = Math.ceil(JSON.stringify(compressed.tools).length / 4);
             options.onRequest?.({
                 sessionId: String(request.sessionId ?? ''),
-                beforeTokens: messagesTokens + Math.ceil(toolsBeforeChars / 4),
-                afterTokens: messagesTokens + Math.ceil(JSON.stringify(compressed.tools).length / 4),
+                beforeTokens: messagesTokens + toolsBeforeTokens,
+                afterTokens: messagesTokens + toolsAfterTokens,
                 savedTokens: compressed.stats.tokensSaved,
+                toolsBeforeTokens,
+                toolsAfterTokens,
             });
             if (compressed.stats.changed === 0 && hidden.length === 0)
                 return request;

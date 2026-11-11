@@ -12,7 +12,7 @@ import { runExtraction } from './modules/extraction'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
 import { SavingsLedger } from './modules/savings-ledger'
-import { workspaceRef } from './modules/workspace'
+import { workspaceRef, workspaceRefFromSession } from './modules/workspace'
 import { logEvent } from './log'
 
 interface Outcome {
@@ -214,21 +214,43 @@ check('savings.ledger-cost-model', () => {
   assert(workspaceA.id === workspaceRef('d:/PC/dsh/dsh-context-manager/').id, 'workspace id must be stable across separators/case')
 
   const ledger = new SavingsLedger()
-  ledger.record('schema', 2704, 'schema', workspaceA)
+  ledger.record('schema', 2704, 'schema', workspaceA, 10800)
   ledger.record('extraction', 100, 'output', workspaceB)
   ledger.recordRequestTokens(workspaceA, 10000, 8000)
   ledger.recordRequestTokens(workspaceB, 5000, 2500)
   const snapshot = ledger.snapshot()
 
-  assert(snapshot.schemaVersion === 4, `schemaVersion=${snapshot.schemaVersion}`)
+  assert(snapshot.schemaVersion === 5, `schemaVersion=${snapshot.schemaVersion}`)
   assert(snapshot.ledgerId.length > 0, 'ledgerId required')
   assert(Object.keys(snapshot.byWorkspace).length === 2, 'expected two workspaces')
   assert(snapshot.totalSavedTokens === 2804, `prompt tokens removed=${snapshot.totalSavedTokens}`)
+  assert(snapshot.byModuleBefore.schema === 10800, `schema before=${snapshot.byModuleBefore.schema}`)
+  assert(snapshot.byModuleBefore.extraction === 100, `extraction before=${snapshot.byModuleBefore.extraction}`)
   assert(snapshot.estimatedCostTokens === 190, `cost-aware estimate=${snapshot.estimatedCostTokens} (90 + 100)`)
   assert(snapshot.tokensBeforeTotal === 15000 && snapshot.tokensAfterTotal === 10500, 'before/after totals')
   const perWorkspace = snapshot.byWorkspace[workspaceA.id]!
   assert(perWorkspace.totalSavedTokens === 2704, 'workspace A total')
+  assert(perWorkspace.byModuleBefore.schema === 10800, 'workspace A schema before')
   assert(perWorkspace.tokensBeforeTotal === 10000, 'workspace A before total')
+})
+
+// ---------------------------------------------------------------------------
+// 8) 工作区解析不能因 cordis 代理访问而抛错（2026-11-10 hook 全挂事故）
+// ---------------------------------------------------------------------------
+
+check('workspace.safe-proxy', () => {
+  const throwing = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error('cannot get property "options" without inject')
+      },
+    },
+  )
+  const ref = workspaceRefFromSession(throwing, throwing)
+  assert(ref === null, 'proxy access must be caught and return null, not throw')
+  const ref2 = workspaceRefFromSession({ header: { cwd: 'D:\\PC\\dsh\\dsh-context-manager' } })
+  assert(ref2 !== null && ref2.path.toLowerCase().includes('dsh-context-manager'), 'header.cwd must resolve')
 })
 
 // ---------------------------------------------------------------------------
