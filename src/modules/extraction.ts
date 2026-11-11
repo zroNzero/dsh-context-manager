@@ -13,7 +13,7 @@
 import { estimateTokens, hashText } from '../contracts'
 import { logEvent } from '../log'
 
-export type ExtractionMode = 'none' | 'ast' | 'json' | 'section' | 'index' | 'head-tail' | 'firewall'
+export type ExtractionMode = 'none' | 'ast' | 'json' | 'section' | 'index' | 'head-tail' | 'toon' | 'firewall'
 
 export interface ExtractionResult {
   text: string
@@ -483,6 +483,49 @@ export function buildFirewallSummary(
   return { text: summary, tokens: estimateTokens(summary), tokensBefore: estimateTokens(text) }
 }
 
+/**
+ * TOON —— 列式无损重编码（v1.3）。
+ *
+ * 只处理「同构对象数组」：表头写一次，行数据用紧凑数组表示；
+ * 值用 JSON.stringify 序列化，并对反斜杠与竖线转义，保证可逆。
+ * 解析失败或收益为负时返回 null（调用方回退 json/原文）。
+ */
+export function toonEncode(text: string): {
+  text: string
+  rows: number
+  cols: number
+  tokensBefore: number
+  tokensAfter: number
+} | null {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('[')) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed) || parsed.length < 5) return null
+  if (!parsed.every((item) => item !== null && typeof item === 'object' && !Array.isArray(item))) return null
+  const first = parsed[0] as Record<string, unknown>
+  const keys = Object.keys(first)
+  if (keys.length < 2) return null
+  if (!parsed.every((item) => {
+    const record = item as Record<string, unknown>
+    return Object.keys(record).length === keys.length && keys.every((key) => key in record)
+  })) return null
+
+  const encode = (value: unknown): string =>
+    JSON.stringify(value ?? null).replace(/\\/g, '\\\\').replace(/\|/g, '\\|')
+  const header = keys.join('|')
+  const rows = parsed.map((item) => keys.map((key) => encode((item as Record<string, unknown>)[key])).join('|'))
+  const output = `#TOON rows=${parsed.length} cols=${keys.length}\n${header}\n${rows.join('\n')}`
+  const tokensBefore = estimateTokens(text)
+  const tokensAfter = estimateTokens(output)
+  if (tokensAfter >= tokensBefore) return null
+  return { text: output, rows: parsed.length, cols: keys.length, tokensBefore, tokensAfter }
+}
+
 export function runExtraction(input: { text: string; maxTokens: number; budgetMs?: number }): ExtractionResult {
   const startedAt = Date.now()
   const budgetMs = input.budgetMs ?? 50
@@ -545,6 +588,22 @@ export function runExtraction(input: { text: string; maxTokens: number; budgetMs
           elapsedMs: Date.now() - startedAt,
         })
       }
+    }
+  }
+
+  if (mode === 'none') {
+    const toon = toonEncode(text)
+    if (toon !== null) {
+      body = toon.text
+      mode = 'toon'
+      logEvent('info', 'toon.encoded', {
+        module: 'TOON',
+        rows: toon.rows,
+        cols: toon.cols,
+        tokensBefore: toon.tokensBefore,
+        tokensAfter: toon.tokensAfter,
+        rate: Number((1 - toon.tokensAfter / toon.tokensBefore).toFixed(3)),
+      })
     }
   }
 

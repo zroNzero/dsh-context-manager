@@ -94,6 +94,13 @@ exports.Config = zod_1.z.object({
     /** 精确哈希响应缓存（v1.2）：同一请求 5 分钟内直接重放。 */
     responseCacheEnabled: zod_1.z.boolean().default(true),
     responseCacheTtlMs: zod_1.z.number().int().positive().default(300_000),
+    /** 语义缓存 Jaccard 阈值（v1.3）。 */
+    semanticCacheThreshold: zod_1.z.number().min(0.5).max(1).default(0.85),
+    /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
+    toolAttentionEnabled: zod_1.z.boolean().default(true),
+    toolAttentionTopK: zod_1.z.number().int().positive().default(5),
+    /** 本地 LLM 端点（v1.3 快速探测）。 */
+    localBaseUrl: zod_1.z.string().default('http://127.0.0.1:11434'),
     /** 是否真正发起本地路由请求（决策与日志始终开启）。 */
     localRouting: zod_1.z.boolean().default(false),
     /** spill 目录保留的最大文件数。 */
@@ -305,11 +312,30 @@ function apply(ctx, rawConfig = {}) {
     let admissionRuns = 0;
     let lastRoutingKey = '';
     const sessions = new Map();
-    const router = new routing_1.RoutingModule();
+    const router = new routing_1.RoutingModule({ baseUrl: config.localBaseUrl, timeoutMs: 1500 });
     const breaker = new breaker_1.CompressionBreaker({ name: 'extraction', failureThreshold: 3, cooldownMs: 10 * 60_000 });
     const dedup = new dedup_bus_1.DedupBus(256);
     const ledger = new savings_ledger_1.SavingsLedger();
-    const responseCache = new response_cache_1.ResponseCache({ ttlMs: config.responseCacheTtlMs });
+    const responseCache = new response_cache_1.ResponseCache({ ttlMs: config.responseCacheTtlMs, similarityThreshold: config.semanticCacheThreshold });
+    const toolSchemas = new Map();
+    let localAvailable = false;
+    const probeLocal = async () => {
+        try {
+            const response = await fetch(`${config.localBaseUrl.replace(/\/+$/, '')}/api/tags`, {
+                signal: AbortSignal.timeout(500),
+            });
+            localAvailable = response.ok;
+        }
+        catch {
+            localAvailable = false;
+        }
+        (0, log_1.logEvent)('info', localAvailable ? 'routing.local_available' : 'routing.local_unavailable', {
+            module: 'Routing',
+            baseUrl: config.localBaseUrl,
+        });
+    };
+    if (config.localRouting)
+        void probeLocal();
     const savingsMarkdown = path.resolve(process.cwd(), 'savings.md');
     const savingsJson = path.resolve(process.cwd(), 'savings.json');
     let savingsTimer = null;
@@ -412,6 +438,45 @@ function apply(ctx, rawConfig = {}) {
     catch (error) {
         (0, log_1.logEvent)('warn', 'tools.register.failed', { error: String(error) });
     }
+    // v1.3：search_tools 元工具，供模型按需拉取被懒加载隐藏的工具 schema。
+    try {
+        const searchDisposer = services.tools?.register?.({
+            name: 'search_tools',
+            description: 'Return the full JSON schema of tools hidden by lazy loading. Query by tool name or keywords.',
+            parameters: {
+                query: { type: 'string', description: 'tool name or keywords', required: true },
+            },
+            output: {
+                schema: {
+                    type: 'object',
+                    properties: { ok: { type: 'boolean' }, tools: { type: 'string' } },
+                    required: ['ok', 'tools'],
+                    additionalProperties: false,
+                },
+                render: (value) => [{ type: 'text', text: String(value?.tools ?? '') }],
+            },
+            execute: async (exec) => {
+                const query = String(exec?.parameters?.query ?? exec?.query ?? '').toLowerCase();
+                const matches = [...toolSchemas.values()]
+                    .filter((tool) => {
+                    if (!query)
+                        return false;
+                    return (String(tool.name ?? '').toLowerCase().includes(query) ||
+                        String(tool.description ?? '').toLowerCase().includes(query));
+                })
+                    .slice(0, 5);
+                return {
+                    ok: matches.length > 0,
+                    tools: matches.length > 0 ? JSON.stringify(matches) : `no tool matched "${query}"`,
+                };
+            },
+        });
+        if (typeof searchDisposer === 'function')
+            disposers.push(searchDisposer);
+    }
+    catch (error) {
+        (0, log_1.logEvent)('warn', 'search_tools.register.failed', { error: String(error) });
+    }
     // Schema 压缩依赖 llm 服务。真实 DSH 里 llm 可能挂在 agent 作用域而非 profile 根，
     // 因此既在根 ctx 上重试，也在首条 pre-step 的 payload.agent.loopCtx.llm 上补装。
     const pendingTimers = [];
@@ -433,6 +498,13 @@ function apply(ctx, rawConfig = {}) {
                 : undefined,
             responseCache: config.responseCacheEnabled ? responseCache : undefined,
             onCacheHit: () => (0, log_1.logEvent)('info', 'cache.response_hit', responseCache.stats()),
+            onSemanticHit: (score) => (0, log_1.logEvent)('info', 'cache.semantic_hit', { score, ...responseCache.stats() }),
+            toolAttention: { enabled: config.toolAttentionEnabled, topK: config.toolAttentionTopK },
+            onToolCatalog: (tools) => {
+                toolSchemas.clear();
+                for (const tool of tools)
+                    toolSchemas.set(tool.name, tool);
+            },
             onRequest: ({ sessionId, beforeTokens, afterTokens, savedTokens, toolsBeforeTokens, rewriteSaved, rewriteBeforeTokens, rewriteAfterTokens, }) => {
                 const workspace = sessionWorkspaces.get(sessionId) ?? (0, workspace_1.workspaceRef)('(unknown)');
                 ledger.recordRequestTokens(workspace, beforeTokens, afterTokens);
@@ -739,6 +811,9 @@ function apply(ctx, rawConfig = {}) {
                     degraded: routed.degraded,
                     latencyMs: routed.latencyMs,
                 });
+                if (routed.route === 'local') {
+                    (0, log_1.logEvent)('info', 'routing.local_hit', { module: 'Routing', latencyMs: routed.latencyMs });
+                }
             }
             if (!plan.patch)
                 return downstream;

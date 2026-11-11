@@ -16,6 +16,7 @@ exports.looksLikeCode = looksLikeCode;
 exports.isBalancedCode = isBalancedCode;
 exports.skeletonize = skeletonize;
 exports.buildFirewallSummary = buildFirewallSummary;
+exports.toonEncode = toonEncode;
 exports.runExtraction = runExtraction;
 const contracts_1 = require("../contracts");
 const log_1 = require("../log");
@@ -456,6 +457,47 @@ function buildFirewallSummary(text, maxTokens) {
         summary = `${summary.slice(0, budgetChars)}\n[FIREWALL truncated]`;
     return { text: summary, tokens: (0, contracts_1.estimateTokens)(summary), tokensBefore: (0, contracts_1.estimateTokens)(text) };
 }
+/**
+ * TOON —— 列式无损重编码（v1.3）。
+ *
+ * 只处理「同构对象数组」：表头写一次，行数据用紧凑数组表示；
+ * 值用 JSON.stringify 序列化，并对反斜杠与竖线转义，保证可逆。
+ * 解析失败或收益为负时返回 null（调用方回退 json/原文）。
+ */
+function toonEncode(text) {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith('['))
+        return null;
+    let parsed;
+    try {
+        parsed = JSON.parse(trimmed);
+    }
+    catch {
+        return null;
+    }
+    if (!Array.isArray(parsed) || parsed.length < 5)
+        return null;
+    if (!parsed.every((item) => item !== null && typeof item === 'object' && !Array.isArray(item)))
+        return null;
+    const first = parsed[0];
+    const keys = Object.keys(first);
+    if (keys.length < 2)
+        return null;
+    if (!parsed.every((item) => {
+        const record = item;
+        return Object.keys(record).length === keys.length && keys.every((key) => key in record);
+    }))
+        return null;
+    const encode = (value) => JSON.stringify(value ?? null).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+    const header = keys.join('|');
+    const rows = parsed.map((item) => keys.map((key) => encode(item[key])).join('|'));
+    const output = `#TOON rows=${parsed.length} cols=${keys.length}\n${header}\n${rows.join('\n')}`;
+    const tokensBefore = (0, contracts_1.estimateTokens)(text);
+    const tokensAfter = (0, contracts_1.estimateTokens)(output);
+    if (tokensAfter >= tokensBefore)
+        return null;
+    return { text: output, rows: parsed.length, cols: keys.length, tokensBefore, tokensAfter };
+}
 function runExtraction(input) {
     const startedAt = Date.now();
     const budgetMs = input.budgetMs ?? 50;
@@ -514,6 +556,21 @@ function runExtraction(input) {
                     elapsedMs: Date.now() - startedAt,
                 });
             }
+        }
+    }
+    if (mode === 'none') {
+        const toon = toonEncode(text);
+        if (toon !== null) {
+            body = toon.text;
+            mode = 'toon';
+            (0, log_1.logEvent)('info', 'toon.encoded', {
+                module: 'TOON',
+                rows: toon.rows,
+                cols: toon.cols,
+                tokensBefore: toon.tokensBefore,
+                tokensAfter: toon.tokensAfter,
+                rate: Number((1 - toon.tokensAfter / toon.tokensBefore).toFixed(3)),
+            });
         }
     }
     if (mode === 'none') {

@@ -16,6 +16,7 @@
  */
 import type { RewriteResult } from './history-rewriter';
 import { type ResponseCache } from './response-cache';
+import { type ToolLike } from './tool-attention';
 export interface SchemaStats {
     changed: number;
     charsBefore: number;
@@ -72,6 +73,15 @@ export interface SchemaCompressorOptions {
     /** 精确哈希响应缓存（v1.2）：命中时直接重放 chunk。 */
     responseCache?: ResponseCache;
     onCacheHit?: () => void;
+    /** 语义缓存命中回调（v1.3）。 */
+    onSemanticHit?: (score: number) => void;
+    /** 工具懒加载（v1.3）：只注入 top-K 完整 schema，其余进目录。 */
+    toolAttention?: {
+        enabled?: boolean;
+        topK?: number;
+    };
+    /** 把完整工具表回传给宿主，供 search_tools 元工具查询。 */
+    onToolCatalog?: (tools: ToolLike[]) => void;
 }
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。

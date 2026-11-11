@@ -23,6 +23,7 @@ exports.schemaTokens = schemaTokens;
 const contracts_1 = require("../contracts");
 const log_1 = require("../log");
 const response_cache_1 = require("./response-cache");
+const tool_attention_1 = require("./tool-attention");
 function truncateText(value, maxChars) {
     const points = Array.from(value);
     if (points.length <= maxChars)
@@ -175,12 +176,40 @@ function installSchemaCompressor(ctx, options = {}) {
         return () => { };
     }
     let lastLogKey = '';
+    const lastToolSignature = new Map();
     const transform = (request) => {
         try {
             if (!request)
                 return request;
             const rewrite = options.rewriteHistory?.(request.messages) ?? null;
-            const messages = rewrite?.messages ?? request.messages;
+            let messages = rewrite?.messages ?? request.messages;
+            let attendedTools = null;
+            if (options.toolAttention?.enabled && Array.isArray(request.tools) && request.tools.length > 1) {
+                const selection = (0, tool_attention_1.selectTools)(request.tools, lastUserText(messages) ?? '', options.toolAttention.topK ?? 5);
+                if (selection.hidden.length > 0) {
+                    messages = (0, tool_attention_1.withCatalog)(messages, selection.catalog);
+                    options.onToolCatalog?.(request.tools);
+                    attendedTools = selection.selected;
+                    const sessionKey = String(request.sessionId ?? 'unknown');
+                    const signature = selection.selected.map((tool) => tool.name).join(',');
+                    const previous = lastToolSignature.get(sessionKey);
+                    if (previous !== undefined && previous !== signature) {
+                        (0, log_1.logEvent)('warn', 'tool_attention.prefix_risk', {
+                            module: 'ToolAttention',
+                            sessionId: sessionKey,
+                            reason: 'tool set changed across requests; prefix cache may miss',
+                        });
+                    }
+                    lastToolSignature.set(sessionKey, signature);
+                    (0, log_1.logEvent)('info', 'tool_attention.filtered', {
+                        module: 'ToolAttention',
+                        total: request.tools.length,
+                        selected: selection.selected.length,
+                        hidden: selection.hidden.length,
+                        tools: selection.selected.map((tool) => tool.name),
+                    });
+                }
+            }
             const messagesTokens = estimateMessagesTokens(messages);
             const rewriteSaved = rewrite?.saved ?? 0;
             const rewriteBeforeTokens = rewrite?.beforeTokens ?? messagesTokens;
@@ -199,7 +228,7 @@ function installSchemaCompressor(ctx, options = {}) {
                 return rewrite ? { ...request, messages } : request;
             }
             const toolsBeforeChars = JSON.stringify(request.tools).length;
-            let tools = request.tools;
+            let tools = (attendedTools ?? request.tools);
             let hidden = [];
             if (selectionEnabled) {
                 const selected = selectStableToolSet(tools, lastUserText(request.messages), { topK });
@@ -263,6 +292,14 @@ function installSchemaCompressor(ctx, options = {}) {
             options.onCacheHit?.();
             return (0, response_cache_1.replayChunks)(hit);
         }
+        const semanticText = `${optimized?.model ?? ''} ${lastUserText(optimized?.messages) ?? ''} ${(optimized?.tools ?? [])
+            .map((tool) => tool?.name ?? '')
+            .join(' ')}`;
+        const similar = cache.findSimilar(semanticText);
+        if (similar) {
+            options.onSemanticHit?.(similar.score);
+            return (0, response_cache_1.replayChunks)(similar.chunks);
+        }
         const stream = invoke(optimized);
         return (async function* () {
             const chunks = [];
@@ -270,7 +307,7 @@ function installSchemaCompressor(ctx, options = {}) {
                 chunks.push(chunk);
                 yield chunk;
             }
-            cache.set(key, chunks);
+            cache.set(key, chunks, semanticText);
         })();
     };
     try {

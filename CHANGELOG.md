@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.3.0 — 2026-11-11
+
+### 四件重型武器
+
+- **Tool Attention（顶-5 懒加载）**：按意图对工具打分，只注入 top-5 完整 schema；
+  其余工具在 system 消息里保留 `[TOOL_CATALOG]` 一行目录，并提供 `search_tools`
+  元工具按需拉取。demo：80 → 5 个工具，schema 2,200 → 208 tokens；线上 80 工具
+  场景预计 20,296 → ≤2,500。动态工具集会改变前缀，记录 `tool_attention.prefix_risk`。
+- **TOON 列式无损编码**：同构 JSON 数组 → 表头 + 紧凑行；demo：120×5 行
+  3,292 → 1,173 tokens（-64.4%），零信息损失（JSON.stringify + 转义可逆）。
+- **语义缓存**：在精确哈希之外增加 Jaccard 关键词相似（阈值 0.85），命中重放
+  并写 `cache.semantic_hit`；demo 命中分数 0.895。
+- **本地路由探测**：`localBaseUrl`（默认 127.0.0.1:11434）500ms 探测；
+  不可达写 `routing.local_unavailable` 且不阻塞主链路，可达时对简单任务走本地并写
+  `routing.local_hit`。演示同时覆盖两种结局。
+- 测试：`self-test 13/13`、`verify 18/18`。
+
 ## v1.2.0 — 2026-11-11
 
 ### 请求级历史重写 + 精确哈希响应缓存（不碰 session surface）

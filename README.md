@@ -117,6 +117,10 @@ dsh install D:\path\to\dsh-context-manager
         rewriteEnabled: true
         rewriteRetainRecent: 8
         responseCacheEnabled: true
+        toolAttentionEnabled: true
+        toolAttentionTopK: 5
+        semanticCacheThreshold: 0.85
+        localBaseUrl: http://127.0.0.1:11434
         compressionBudgetMs: 50
         localRouting: false
         spillMaxFiles: 50

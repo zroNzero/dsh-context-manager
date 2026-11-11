@@ -19,6 +19,9 @@ import { RoutingModule } from './modules/routing'
 import { collectGarbage, pinSpill } from './modules/spill-gc'
 import { installSchemaCompressor, schemaTokens } from './modules/schema-index'
 import { CompressionBreaker } from './modules/breaker'
+import { selectTools } from './modules/tool-attention'
+import { toonEncode } from './modules/extraction'
+import { ResponseCache } from './modules/response-cache'
 
 const write = (line: string): void => {
   process.stdout.write(`${line}\n`)
@@ -300,6 +303,64 @@ async function main(): Promise<void> {
   const hugeMs = Date.now() - hugeStarted
   const hugeReturned = String(hugeOut?.content?.[0]?.text ?? '')
 
+  // ---------- 11. v1.3：Tool Attention / TOON / 语义缓存 / 本地探测 ----------
+  const attentionTools = Array.from({ length: 80 }, (_, index) => ({
+    name: `mcp_tool_${index}`,
+    description: index % 5 === 0 ? 'read files and run tests for the auth module' : `generic utility ${index}`,
+    parameters: { type: 'object', properties: {} },
+  }))
+  const attention = selectTools(attentionTools, 'run the failing test and read the auth file', 5)
+  const attentionBefore = schemaTokens(attentionTools as any)
+  const attentionAfter = schemaTokens(attention.selected as any)
+  logEvent('info', 'tool_attention.filtered', {
+    module: 'ToolAttention',
+    total: attentionTools.length,
+    selected: attention.selected.length,
+    hidden: attention.hidden.length,
+    tokensBefore: attentionBefore,
+    tokensAfter: attentionAfter,
+  })
+
+  const toonRows = Array.from({ length: 120 }, (_, index) => ({
+    id: index,
+    level: 'info',
+    message: `event ${index} finished`,
+    ok: true,
+    ms: index * 2,
+  }))
+  const toon = toonEncode(JSON.stringify(toonRows, null, 2))
+  if (toon) {
+    logEvent('info', 'toon.encoded', {
+      module: 'TOON',
+      rows: toon.rows,
+      cols: toon.cols,
+      tokensBefore: toon.tokensBefore,
+      tokensAfter: toon.tokensAfter,
+      rate: Number((1 - toon.tokensAfter / toon.tokensBefore).toFixed(3)),
+    })
+  }
+
+  const semanticCache = new ResponseCache({ similarityThreshold: 0.85 })
+  const semanticText =
+    'please fix the failing authentication test in the login module today because the build is broken and users cannot sign in'
+  semanticCache.set('demo', [{ type: 'text', text: 'cached' }], semanticText)
+  const semanticHit = semanticCache.findSimilar(semanticText.replace(' test ', ' tests '))
+  if (semanticHit) {
+    logEvent('info', 'cache.semantic_hit', { module: 'ResponseCache', score: semanticHit.score, ...semanticCache.stats() })
+  }
+
+  let localProbeOk = false
+  try {
+    const probe = await fetch('http://127.0.0.1:11434/api/tags', { signal: AbortSignal.timeout(500) })
+    localProbeOk = probe.ok
+  } catch {
+    localProbeOk = false
+  }
+  logEvent('info', localProbeOk ? 'routing.local_available' : 'routing.local_unavailable', { module: 'Routing' })
+  if (localRoute.result.route === 'local') {
+    logEvent('info', 'routing.local_hit', { module: 'Routing', latencyMs: localRoute.result.latencyMs })
+  }
+
   dispose()
 
   // ---------- 汇总 ----------
@@ -314,6 +375,16 @@ async function main(): Promise<void> {
   write(`[8] index-first: ${estimateTokens(listText)} -> ${estimateTokens(listReturned)} tokens (mode=${listReturned.includes('[INDEX]') ? 'index' : 'other'})`)
   write(`[9] dedup: second identical output=${dedupHit ? 'pointer' : 'miss'}, ${dupTokens} -> ${dupAfter} tokens`)
   write(`[10] huge ${hugeCode.length} chars -> ${estimateTokens(hugeReturned)} tokens in ${hugeMs}ms`)
+  write(`[11] tool attention: ${attentionTools.length} -> ${attention.selected.length} tools, schema ${attentionBefore} -> ${attentionAfter} tokens`)
+  write(
+    `[12] toon: ${
+      toon
+        ? `${toon.rows}x${toon.cols}, ${toon.tokensBefore} -> ${toon.tokensAfter} (-${((1 - toon.tokensAfter / toon.tokensBefore) * 100).toFixed(1)}%)`
+        : 'not applicable'
+    }`,
+  )
+  write(`[13] semantic cache: ${semanticHit ? `hit score=${semanticHit.score.toFixed(3)}` : 'miss'}`)
+  write(`[14] routing probe: ${localProbeOk ? 'local available' : 'local unavailable'} | local_hit=${localRoute.result.route === 'local'}`)
 
   logEvent('info', 'demo.summary', {
     pipelineSaved: pipelineBefore - pipelineAfter,

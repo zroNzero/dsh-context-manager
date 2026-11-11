@@ -19,6 +19,7 @@ import { estimateTokens } from '../contracts'
 import { logEvent } from '../log'
 import type { RewriteResult } from './history-rewriter'
 import { replayChunks, type ResponseCache } from './response-cache'
+import { selectTools, withCatalog, type ToolLike } from './tool-attention'
 
 export interface SchemaStats {
   changed: number
@@ -170,6 +171,12 @@ export interface SchemaCompressorOptions {
   /** 精确哈希响应缓存（v1.2）：命中时直接重放 chunk。 */
   responseCache?: ResponseCache
   onCacheHit?: () => void
+  /** 语义缓存命中回调（v1.3）。 */
+  onSemanticHit?: (score: number) => void
+  /** 工具懒加载（v1.3）：只注入 top-K 完整 schema，其余进目录。 */
+  toolAttention?: { enabled?: boolean; topK?: number }
+  /** 把完整工具表回传给宿主，供 search_tools 元工具查询。 */
+  onToolCatalog?: (tools: ToolLike[]) => void
 }
 
 /** 粗略估算消息侧 token（4 字符/token），用于面板比例的分母。 */
@@ -213,12 +220,40 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   }
 
   let lastLogKey = ''
+  const lastToolSignature = new Map<string, string>()
 
   const transform = (request: any): any => {
     try {
       if (!request) return request
       const rewrite = options.rewriteHistory?.(request.messages) ?? null
-      const messages = rewrite?.messages ?? request.messages
+      let messages = rewrite?.messages ?? request.messages
+      let attendedTools: any[] | null = null
+      if (options.toolAttention?.enabled && Array.isArray(request.tools) && request.tools.length > 1) {
+        const selection = selectTools(request.tools as ToolLike[], lastUserText(messages) ?? '', options.toolAttention.topK ?? 5)
+        if (selection.hidden.length > 0) {
+          messages = withCatalog(messages, selection.catalog)
+          options.onToolCatalog?.(request.tools as ToolLike[])
+          attendedTools = selection.selected
+          const sessionKey = String(request.sessionId ?? 'unknown')
+          const signature = selection.selected.map((tool) => tool.name).join(',')
+          const previous = lastToolSignature.get(sessionKey)
+          if (previous !== undefined && previous !== signature) {
+            logEvent('warn', 'tool_attention.prefix_risk', {
+              module: 'ToolAttention',
+              sessionId: sessionKey,
+              reason: 'tool set changed across requests; prefix cache may miss',
+            })
+          }
+          lastToolSignature.set(sessionKey, signature)
+          logEvent('info', 'tool_attention.filtered', {
+            module: 'ToolAttention',
+            total: request.tools.length,
+            selected: selection.selected.length,
+            hidden: selection.hidden.length,
+            tools: selection.selected.map((tool) => tool.name),
+          })
+        }
+      }
       const messagesTokens = estimateMessagesTokens(messages)
       const rewriteSaved = rewrite?.saved ?? 0
       const rewriteBeforeTokens = rewrite?.beforeTokens ?? messagesTokens
@@ -239,7 +274,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
 
       const toolsBeforeChars = JSON.stringify(request.tools).length
 
-      let tools = request.tools as ToolSchemaLike[]
+      let tools = (attendedTools ?? request.tools) as ToolSchemaLike[]
       let hidden: string[] = []
       if (selectionEnabled) {
         const selected = selectStableToolSet(tools, lastUserText(request.messages), { topK })
@@ -304,6 +339,14 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
       options.onCacheHit?.()
       return replayChunks(hit)
     }
+    const semanticText = `${optimized?.model ?? ''} ${lastUserText(optimized?.messages) ?? ''} ${(optimized?.tools ?? [])
+      .map((tool: any) => tool?.name ?? '')
+      .join(' ')}`
+    const similar = cache.findSimilar(semanticText)
+    if (similar) {
+      options.onSemanticHit?.(similar.score)
+      return replayChunks(similar.chunks)
+    }
     const stream = invoke(optimized)
     return (async function* () {
       const chunks: any[] = []
@@ -311,7 +354,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
         chunks.push(chunk)
         yield chunk
       }
-      cache.set(key, chunks)
+      cache.set(key, chunks, semanticText)
     })()
   }
 

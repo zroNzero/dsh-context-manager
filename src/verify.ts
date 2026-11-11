@@ -142,7 +142,9 @@ async function main(): Promise<void> {
     assert(sent && sent !== undefined, 'request not captured')
     const after = estimateTokens(JSON.stringify(sent.tools))
     assert(after < before * 0.8, `schema compression ineffective: ${before}->${after}`)
-    assert(sent.tools.length === schemaTools.length, 'capability set must stay intact')
+    assert(sent.tools.length <= 6, `tool attention expected <=6 tools, got ${sent.tools.length}`)
+    const systemText = JSON.stringify((sent.messages ?? []).find((message: any) => message?.role === 'system') ?? {})
+    assert(systemText.includes('[TOOL_CATALOG]'), 'tool catalog missing from system message')
   })
 
   await check('schema install defers until llm service is ready', async () => {
@@ -454,9 +456,10 @@ async function main(): Promise<void> {
     const sent = captured5[0]
     const after = estimateTokens(JSON.stringify(sent.messages))
     assert(after < before * 0.75, `rewrite ineffective: ${before}->${after}`)
-    assert(sent.messages.length === messages.length, 'messages must not be removed')
-    assert(sent.messages[2].toolCallId === 'call_0', 'tool pairing id must be preserved')
-    assert(!JSON.stringify(sent.messages[1]).includes('<thought>'), 'CoT must be stripped')
+    const nonSystem = sent.messages.filter((message: any) => message?.role !== 'system')
+    assert(nonSystem.length === messages.length, 'messages must not be removed')
+    assert(nonSystem[2].toolCallId === 'call_0', 'tool pairing id must be preserved')
+    assert(!JSON.stringify(nonSystem[1]).includes('<thought>'), 'CoT must be stripped')
     dispose5()
   })
 

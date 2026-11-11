@@ -8,7 +8,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { runCacheAnchorSelfTest } from './cacheAnchor'
-import { runExtraction, buildFirewallSummary } from './modules/extraction'
+import { runExtraction, buildFirewallSummary, toonEncode } from './modules/extraction'
+import { selectTools } from './modules/tool-attention'
+import { ResponseCache } from './modules/response-cache'
 import { estimateTokens } from './contracts'
 import { rewriteMessages } from './modules/history-rewriter'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
@@ -222,6 +224,41 @@ check('history-rewriter.preserves-pairing', () => {
   assert(result.messages[2].toolCallId === 'call_0', 'tool pairing id must be preserved')
   assert(!JSON.stringify(result.messages[1]).includes('<thought>'), 'CoT must be stripped')
   assert(result.messages[result.messages.length - 1].content[0].text === '继续', 'recent messages must stay raw')
+})
+
+check('tool-attention.topk', () => {
+  const tools = Array.from({ length: 80 }, (_, index) => ({
+    name: `tool_${index}`,
+    description: index % 5 === 0 ? `run tests and fix auth module ${index}` : `generic utility ${index}`,
+  }))
+  const selection = selectTools(tools, 'run the failing test and fix auth', 5)
+  assert(selection.selected.length <= 6, `selected=${selection.selected.length}`)
+  assert(selection.hidden.length > 0, 'expected hidden tools')
+  assert(selection.catalog.length === selection.hidden.length, 'catalog must cover hidden tools')
+  assert(selection.selected.some((tool) => tool.name === 'search_tools'), 'search_tools must be present')
+})
+
+check('toon.encoded-json-array', () => {
+  const rows = Array.from({ length: 50 }, (_, index) => ({
+    id: index,
+    name: `item-${index}`,
+    status: 'ok',
+    value: index * 3,
+    detail: `row ${index}`,
+  }))
+  const toon = toonEncode(JSON.stringify(rows, null, 2))
+  assert(toon !== null, 'toon encode failed')
+  assert(toon!.tokensAfter < toon!.tokensBefore * 0.5, `toon rate insufficient: ${toon!.tokensBefore}->${toon!.tokensAfter}`)
+})
+
+check('cache.semantic-hit', () => {
+  const cache = new ResponseCache({ similarityThreshold: 0.85 })
+  const text =
+    'please fix the failing authentication test in the login module today because the build is broken and users cannot sign in'
+  cache.set('k', [{ type: 'text', text: 'answer' }], text)
+  const probe = text.replace(' test ', ' tests ')
+  const hit = cache.findSimilar(probe)
+  assert(hit !== undefined && hit.score >= 0.85, `semantic hit score=${hit?.score}`)
 })
 
 check('memory.savings-accounting', () => {

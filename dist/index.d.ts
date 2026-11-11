@@ -31,6 +31,10 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     rewriteAssistantChars: z.ZodDefault<z.ZodNumber>;
     responseCacheEnabled: z.ZodDefault<z.ZodBoolean>;
     responseCacheTtlMs: z.ZodDefault<z.ZodNumber>;
+    semanticCacheThreshold: z.ZodDefault<z.ZodNumber>;
+    toolAttentionEnabled: z.ZodDefault<z.ZodBoolean>;
+    toolAttentionTopK: z.ZodDefault<z.ZodNumber>;
+    localBaseUrl: z.ZodDefault<z.ZodString>;
     localRouting: z.ZodDefault<z.ZodBoolean>;
     spillMaxFiles: z.ZodDefault<z.ZodNumber>;
     spillTtlHours: z.ZodDefault<z.ZodNumber>;

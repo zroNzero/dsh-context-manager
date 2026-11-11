@@ -9,7 +9,7 @@
  * 3. 抽取后任一约束值丢失 → 返回原文本。
  * 返回 safe=false 时，调用方（index.ts）必须使用 admitted.text（原文/收据），不得使用本模块输出。
  */
-export type ExtractionMode = 'none' | 'ast' | 'json' | 'section' | 'index' | 'head-tail' | 'firewall';
+export type ExtractionMode = 'none' | 'ast' | 'json' | 'section' | 'index' | 'head-tail' | 'toon' | 'firewall';
 export interface ExtractionResult {
     text: string;
     constraints: string;
@@ -44,6 +44,20 @@ export declare function buildFirewallSummary(text: string, maxTokens: number): {
     tokens: number;
     tokensBefore: number;
 };
+/**
+ * TOON —— 列式无损重编码（v1.3）。
+ *
+ * 只处理「同构对象数组」：表头写一次，行数据用紧凑数组表示；
+ * 值用 JSON.stringify 序列化，并对反斜杠与竖线转义，保证可逆。
+ * 解析失败或收益为负时返回 null（调用方回退 json/原文）。
+ */
+export declare function toonEncode(text: string): {
+    text: string;
+    rows: number;
+    cols: number;
+    tokensBefore: number;
+    tokensAfter: number;
+} | null;
 export declare function runExtraction(input: {
     text: string;
     maxTokens: number;
