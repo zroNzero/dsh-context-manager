@@ -20,9 +20,13 @@
   按意图桶每轮重选会作废整段缓存；工具目录仍回填，`search_tools` 照常可用。
 - **TTL Keepalive**（`keepaliveEnabled`，默认开）：在缓存过期前用逐字节相同的前缀
   重放一次（`maxTokens=1`）续命，最多 4 次，真实请求一到即取消；它自己的费用
-  也记进真实账本（`purpose: cache-keepalive`）。
-- 测试：self-test 19/19、verify 26/26（新增前缀不变量、工具块稳定性、
-  keepalive 触发/上限/小 prompt 不触发、真实 usage 账本用例）。
+  也记进真实账本（`purpose: cache-keepalive`）。按会话分别保温，最多 3 个会话。
+- **输出端硬截断默认关闭**（`outputGuardEnabled: false`）：原实现在第一个 JSON/代码块
+  闭合时就停止，「说明 + 代码 + 第二段说明」会被砍掉后半段——这与「不降智」直接冲突，
+  且「提前停止消费是否真让 provider 少 decode」至今没有实盘验证。
+- **本地路由探测不再阻塞主链路**（原来 `await` 一次本地模型生成，结果只写日志、不接管请求）。
+- 测试：self-test 19/19、verify 28/28（新增：默认不截断输出、工具块跨轮稳定、
+  keepalive 触发/上限/会话隔离/小 prompt 不触发、前缀不变量、真实 usage 账本用例）。
 
 ## Unreleased — 真实计费与输出端杠杆
 

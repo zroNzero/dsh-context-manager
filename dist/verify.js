@@ -664,6 +664,42 @@ async function main() {
             dispose();
         }
     });
+    await check('output is never truncated by default', async () => {
+        // 「不降智」的硬保证：默认配置下，模型的完整回答必须原样送到宿主。
+        // 旧默认会在第一个闭合代码块后 return，把「第二段说明」整段吃掉。
+        const defaults = index_1.Config.parse({});
+        assert(defaults.outputGuardEnabled === false, 'output guard must be opt-in: it cuts real answers');
+        const chunks = [
+            { type: 'text-delta', index: 0, text: '先说明问题：\n```js\nconst a = 1\n```\n' },
+            { type: 'text-delta', index: 0, text: '然后是第二段说明：\n```js\nconst b = 2\n```\n' },
+            { type: 'text-delta', index: 0, text: '最后的结论也必须保留。' },
+        ];
+        const captured = [];
+        const ctxO = { systemPrompt: { section: () => () => { } }, tools: { register: () => () => { } }, on: () => () => { } };
+        ctxO.llm = {
+            stream() {
+                captured.push(1);
+                return (async function* () {
+                    for (const chunk of chunks)
+                        yield chunk;
+                })();
+            },
+        };
+        const disposeO = (0, index_1.apply)(ctxO, cfg);
+        const seen = [];
+        for await (const chunk of ctxO.llm.stream({
+            provider: 'p',
+            model: 'm',
+            messages: [{ role: 'user', content: [{ type: 'text', text: '讲讲' }] }],
+        })) {
+            seen.push(chunk);
+        }
+        disposeO();
+        assert(captured.length === 1, `upstream not called once: ${captured.length}`);
+        assert(seen.length === chunks.length, `stream truncated by default: ${seen.length}/${chunks.length} chunks`);
+        const text = seen.map((c) => c.text ?? '').join('');
+        assert(text.includes('最后的结论也必须保留。'), 'tail of the answer was dropped');
+    });
     await check('response cache replays identical request', async () => {
         const ctx6 = { systemPrompt: { section: () => () => { } }, tools: { register: () => () => { } }, on: () => () => { } };
         let calls = 0;

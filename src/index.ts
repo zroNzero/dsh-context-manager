@@ -82,7 +82,16 @@ export const Config = z.object({
   responseCacheEnabled: z.boolean().default(true),
   responseCacheTtlMs: z.number().int().positive().default(300_000),
   /** 输出端硬截断（v2.0）。 */
-  outputGuardEnabled: z.boolean().default(true),
+  /**
+   * 输出端硬截断默认关闭 —— 它会**直接砍掉回答**，与「不降智」冲突。
+   *
+   * 现在的实现在「第一次 JSON 闭合」或「第一次代码块闭合」时立刻 return，
+   * 于是「说明 + 第一段代码 + 第二段说明」这种正常回答会被截在第一个代码块之后。
+   * 而且「客户端提前停止消费是否真的让 provider 少 decode」至今没有实盘验证
+   * （见 STARTUP-PROMPT 的已知卡点 2），收益不确定、代价是确定的信息丢失。
+   * 需要它的人可以显式打开。
+   */
+  outputGuardEnabled: z.boolean().default(false),
   outputMaxTokens: z.number().int().positive().default(1500),
   /** 语义缓存 Jaccard 阈值（v1.3）。 */
   semanticCacheThreshold: z.number().min(0.5).max(1).default(0.85),
@@ -927,18 +936,26 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         })
       }
       if (config.localRouting && localAvailable && routingDecision.route === 'local' && routingTokens < 3000) {
-        const routed = await router.attemptLocal(lastUser?.text ?? '')
-        logEvent('info', 'routing.result', {
-          module: 'Routing',
-          route: routed.route,
-          degraded: routed.degraded,
-          latencyMs: routed.latencyMs,
-        })
-        if (routed.route === 'local') {
-          logEvent('info', 'routing.local_hit', { module: 'Routing', latencyMs: routed.latencyMs })
-        } else {
-          logEvent('info', 'routing.local_degraded', { module: 'Routing', reason: routed.reason })
-        }
+        // 只做观测，不接管请求：真实请求始终走云端。所以绝不能 await ——
+        // 它会让每一轮都多等一次本地模型的生成时间（红线：不得阻塞主链路）。
+        void (async () => {
+          try {
+            const routed = await router.attemptLocal(lastUser?.text ?? '')
+            logEvent('info', 'routing.result', {
+              module: 'Routing',
+              route: routed.route,
+              degraded: routed.degraded,
+              latencyMs: routed.latencyMs,
+            })
+            if (routed.route === 'local') {
+              logEvent('info', 'routing.local_hit', { module: 'Routing', latencyMs: routed.latencyMs })
+            } else {
+              logEvent('info', 'routing.local_degraded', { module: 'Routing', reason: routed.reason })
+            }
+          } catch (error) {
+            logEvent('warn', 'routing.probe_failed', { module: 'Routing', error: String(error) })
+          }
+        })()
       }
 
       if (!plan.patch) return downstream

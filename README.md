@@ -125,6 +125,7 @@ dsh install D:\path\to\dsh-context-manager
         keepaliveTtlMs: 240000
         keepaliveRefreshes: 4
         keepaliveMinPromptTokens: 8000
+        outputGuardEnabled: false       # 会砍掉正常回答（首个代码块/JSON 闭合即停），默认关
         localBaseUrl: http://127.0.0.1:11434
         compressionBudgetMs: 50
         localRouting: false
