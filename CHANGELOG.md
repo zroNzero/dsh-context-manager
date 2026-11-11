@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.0.0-prod — 2026-11-11
+
+### 三大杠杆 + 防降智护栏
+
+- **AST 深度骨架化**：签名之外补回 1-hop 依赖（参数类型、抛出异常、被继承/实现/引用
+  的声明名），写入 `[AST_DEP]` 行；日志 `ast.deep_dependencies`。
+- **Schema 分层虚拟化**：top-3 工具全量 schema；rank 4–10 只给「参数名 + 类型」签名；
+  其余只留目录 + `[TOOL_NOT_LOADED]` 显式提示 + `search_tools`。
+- **工具输出形状保护**：报错/警告行保留前后 3 行上下文，连续重复行折叠为 `⟨×N⟩`；
+  日志 `shape.protected`。
+- **防降智对抗测试**（verify 21/21）：
+  - A：2000 行复杂嵌套类型代码 → 参数类型/异常/1-hop 依赖全在；
+  - B：80 工具会话 → ≤12 个注入 + `search_tools` + 显式 `TOOL_NOT_LOADED`；
+  - C：中间报错日志 → 错误前 3 行上下文保留。
+- `self-test 17/17`、`tsc EXIT=0`。
+
 ## v1.0.0 — Production Release — 2026-11-11
 
 ### 全量武器审计后的四项重型系统

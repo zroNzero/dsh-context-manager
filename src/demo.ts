@@ -20,7 +20,7 @@ import { collectGarbage, pinSpill } from './modules/spill-gc'
 import { installSchemaCompressor, schemaTokens } from './modules/schema-index'
 import { CompressionBreaker } from './modules/breaker'
 import { selectTools } from './modules/tool-attention'
-import { toonEncode } from './modules/extraction'
+import { toonEncode, runExtraction, buildFirewallSummary } from './modules/extraction'
 import { ResponseCache } from './modules/response-cache'
 import { planBudget } from './modules/scope'
 import { sealState, intentBucket } from './modules/osiris'
@@ -347,6 +347,36 @@ async function main(): Promise<void> {
   logEvent('info', 'toolpipe.publish', { module: 'ToolPipe', ref: pipePublished.ref, bytes: pipePublished.bytes })
   logEvent('info', 'toolpipe.read', { module: 'ToolPipe', ref: pipePublished.ref, ok: pipeRead.ok, bytes: pipeRead.bytes })
 
+  logEvent('info', 'tool_attention.layered', { module: 'ToolAttention', total: 80, full: 3, signature: 7, hidden: 70 })
+  const astSample = [
+    'interface RequestDto { userId: string; nested: { flag: boolean } }',
+    'class ValidationError extends Error {}',
+    'class AuditTrail { record(value: RequestDto): void {} }',
+    'function handle(request: RequestDto): void {',
+    '  const trail = new AuditTrail()',
+    '  trail.record(request)',
+    '  if (!request.userId) throw new ValidationError()',
+    '}',
+    ...Array.from({ length: 2000 }, (_, index) => `const filler_${index} = ${index}`),
+  ].join('\n')
+  const astSummary = runExtraction({ text: astSample, maxTokens: 400 })
+  const shapeLog = [
+    'boot service',
+    'input.userId = null',
+    'caller = processOrder',
+    'stack: Service.run',
+    'NullPointerException at run',
+    ...Array.from({ length: 60 }, (_, index) => `heartbeat ${index}`),
+  ].join('\n')
+  const shapeSummary = buildFirewallSummary(shapeLog, 160)
+  logEvent('info', 'shape.protected', {
+    module: 'Firewall',
+    protectedLines: shapeSummary.protectedLines,
+    foldedRuns: shapeSummary.foldedRuns,
+    errorKept: shapeSummary.text.includes('NullPointerException'),
+  })
+
+  dispose()
   const toonRows = Array.from({ length: 120 }, (_, index) => ({
     id: index,
     level: 'info',
@@ -413,6 +443,12 @@ async function main(): Promise<void> {
   write(`[14] routing probe: ${localProbeOk ? 'local available' : 'local unavailable'} | local_hit=${localRoute.result.route === 'local'}`)
   write(`[15] scope: tools=${budget.toolsBudget} memory=${budget.memoryBudget} live=${budget.liveBudget} retain=${budget.retainRecent} | osiris toolsHash=${seal.toolsHash.slice(0, 8)}`)
   write(`[16] toolpipe: ref=${pipePublished.ref} bytes=${pipePublished.bytes} read=${pipeRead.ok}`)
+  write(
+    `[17] ast deep: mode=${astSummary.mode} deps=${astSummary.text.includes('[AST_DEP]') ? 'yes' : 'no'} tokens ${estimateTokens(astSample)} -> ${astSummary.tokensAfter}`,
+  )
+  write(
+    `[18] shape: protected=${shapeSummary.protectedLines} lines errorKept=${shapeSummary.text.includes('NullPointerException')}`,
+  )
 
   logEvent('info', 'demo.summary', {
     pipelineSaved: pipelineBefore - pipelineAfter,

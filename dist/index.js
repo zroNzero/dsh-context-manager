@@ -674,6 +674,8 @@ function apply(ctx, rawConfig = {}) {
                         tokensBefore: firewall.tokensBefore,
                         tokensAfter: firewall.tokens,
                         saved: extracted.tokensSaved,
+                        protectedLines: firewall.protectedLines,
+                        foldedRuns: firewall.foldedRuns,
                     });
                 }
             }

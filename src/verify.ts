@@ -18,6 +18,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { apply, Config, inject, name } from './index'
 import { estimateTokens } from './contracts'
+import { runExtraction, buildFirewallSummary } from './modules/extraction'
 
 const results: Array<{ ok: boolean; label: string; detail: string }> = []
 
@@ -142,9 +143,10 @@ async function main(): Promise<void> {
     assert(sent && sent !== undefined, 'request not captured')
     const after = estimateTokens(JSON.stringify(sent.tools))
     assert(after < before * 0.8, `schema compression ineffective: ${before}->${after}`)
-    assert(sent.tools.length <= 6, `tool attention expected <=6 tools, got ${sent.tools.length}`)
+    assert(sent.tools.length <= 12, `layered tools expected <=12, got ${sent.tools.length}`)
     const systemText = JSON.stringify((sent.messages ?? []).find((message: any) => message?.role === 'system') ?? {})
     assert(systemText.includes('[TOOL_CATALOG]'), 'tool catalog missing from system message')
+    assert(systemText.includes('[TOOL_NOT_LOADED]'), 'explicit not-loaded hint missing')
   })
 
   await check('schema install defers until llm service is ready', async () => {
@@ -483,6 +485,67 @@ async function main(): Promise<void> {
     assert(calls === 1, `response cache missed: calls=${calls}`)
     assert(JSON.stringify(first) === JSON.stringify(second), 'cached chunks mismatch')
     dispose6()
+  })
+
+  await check('degradation A: AST keeps 1-hop dependencies', async () => {
+    const code = [
+      'interface RequestDto { userId: string; nested: { a: number } }',
+      'class ValidationError extends Error {}',
+      'class AuditTrail { record(x: RequestDto): void {} }',
+      'function handle(request: RequestDto): void {',
+      '  const trail = new AuditTrail()',
+      '  trail.record(request)',
+      '  if (!request.userId) throw new ValidationError()',
+      '}',
+      ...Array.from({ length: 2000 }, (_, index) => `const filler_${index} = ${index}`),
+    ].join('\n')
+    const result = runExtraction({ text: code, maxTokens: 400 })
+    assert(result.safe && result.mode === 'ast', `expected ast mode, got ${result.mode}/${result.safe}`)
+    assert(result.text.includes('RequestDto'), 'param type missing')
+    assert(result.text.includes('ValidationError'), 'thrown exception missing')
+    assert(result.text.includes('AuditTrail'), '1-hop dependency missing')
+    assert(estimateTokens(result.text) < estimateTokens(code), 'AST did not compress')
+  })
+
+  await check('degradation B: hidden tools get explicit hint', async () => {
+    const ctx7: any = { systemPrompt: { section: () => () => {} }, tools: { register: () => () => {} }, on: () => () => {} }
+    const captured7: any[] = []
+    ctx7.llm = {
+      stream(request: any) {
+        captured7.push(request)
+        return (async function* () {})()
+      },
+    }
+    const dispose7 = apply(ctx7, cfg)
+    const manyTools = Array.from({ length: 80 }, (_, index) => ({
+      name: `bulk_tool_${index}`,
+      description: `bulk tool ${index} handles data processing`,
+      parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    }))
+    ctx7.llm.stream({ provider: 'p', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: 'process the data' }] }], tools: manyTools })
+    const sent7 = captured7[0]
+    assert(sent7.tools.length <= 12, `layered tools too many: ${sent7.tools.length}`)
+    assert(sent7.tools.some((tool: any) => tool.name === 'search_tools'), 'search_tools missing')
+    const system7 = JSON.stringify((sent7.messages ?? []).find((message: any) => message?.role === 'system') ?? {})
+    assert(system7.includes('[TOOL_NOT_LOADED]'), 'explicit TOOL_NOT_LOADED hint missing')
+    assert(system7.includes('bulk_tool_79'), 'catalog missing hidden tool name')
+    dispose7()
+  })
+
+  await check('degradation C: error context window kept', async () => {
+    const log = [
+      'boot service',
+      'input.userId = null',
+      'caller = processOrder',
+      'stack: Service.run at line 42',
+      'NullPointerException at run',
+      'warn: retry 3',
+      ...Array.from({ length: 80 }, (_, index) => `heartbeat ${index}`),
+    ].join('\n')
+    const summary = buildFirewallSummary(log, 160)
+    assert(summary.text.includes('input.userId = null'), '3-line pre-context missing')
+    assert(summary.text.includes('caller = processOrder'), 'caller context missing')
+    assert(summary.text.includes('NullPointerException'), 'error line missing')
   })
 
   await check('no console.log in sources', () => {

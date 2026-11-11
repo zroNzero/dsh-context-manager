@@ -19,7 +19,7 @@ import { estimateTokens } from '../contracts'
 import { logEvent } from '../log'
 import type { RewriteResult } from './history-rewriter'
 import { replayChunks, type ResponseCache } from './response-cache'
-import { selectTools, selectToolsScout, selectionFromNames, withCatalog, type ToolLike, type ToolSelection } from './tool-attention'
+import { selectTools, selectToolsScout, selectionFromNames, withCatalog, SEARCH_TOOLS_DEF, firstSentence, type ToolLike, type ToolSelection } from './tool-attention'
 import { planBudget, type ScopeBudget } from './scope'
 import { sealState, intentBucket } from './osiris'
 
@@ -199,6 +199,21 @@ function estimateMessagesTokens(messages: any): number {
   return Math.ceil(chars / 4)
 }
 
+/** 第二层：签名（参数名 + 类型，不含嵌套 schema/描述细节）。 */
+function signatureTool(tool: ToolLike): ToolLike {
+  const parameters = (tool as any).parameters ?? {}
+  const properties = parameters.properties ?? {}
+  const signatureProperties: Record<string, any> = {}
+  for (const [key, value] of Object.entries<any>(properties)) {
+    signatureProperties[key] = { type: value?.type ?? 'any' }
+  }
+  return {
+    ...tool,
+    description: firstSentence(tool.description ?? '', 60),
+    parameters: { type: 'object', properties: signatureProperties, required: parameters.required ?? [] },
+  } as ToolLike
+}
+
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。
  * 失败安全：任何异常原样放行。
@@ -276,15 +291,32 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
           })
         }
         if (selection.hidden.length > 0) {
-          messages = withCatalog(messages, selection.catalog)
+          const selectedNames = selection.selected.map((tool) => tool.name).filter((name) => name !== 'search_tools')
+          const fullNames = selectedNames.slice(0, 3)
+          const signatureNames = selectedNames.slice(3, 10)
+          const byName = new Map((request.tools as ToolLike[]).map((tool) => [tool.name, tool]))
+          const fullTools = fullNames.map((name) => byName.get(name)).filter((tool): tool is ToolLike => tool !== undefined)
+          const signatureTools = signatureNames
+            .map((name) => byName.get(name))
+            .filter((tool): tool is ToolLike => tool !== undefined)
+            .map(signatureTool)
+          const included = new Set([...fullNames, ...signatureNames, 'search_tools'])
+          const hiddenTools = (request.tools as ToolLike[]).filter((tool) => !included.has(tool.name))
+          const catalog = hiddenTools.map((tool) => `- ${tool.name}: ${firstSentence(tool.description ?? '')}`)
+          const layered = [...fullTools, ...signatureTools, SEARCH_TOOLS_DEF]
+          messages = withCatalog(messages, [
+            ...catalog,
+            '[TOOL_NOT_LOADED] 未列出的工具必须先调用 search_tools 拉取完整 schema；直接调用会收到 TOOL_NOT_LOADED 提示。',
+          ])
           options.onToolCatalog?.(request.tools as ToolLike[])
-          attendedTools = selection.selected
-          logEvent('info', 'tool_attention.filtered', {
+          attendedTools = layered
+          logEvent('info', 'tool_attention.layered', {
             module: 'ToolAttention',
             total: request.tools.length,
-            selected: selection.selected.length,
-            hidden: selection.hidden.length,
-            tools: selection.selected.map((tool) => tool.name),
+            full: fullTools.length,
+            signature: signatureTools.length,
+            hidden: hiddenTools.length,
+            fullTools: fullNames,
           })
         }
       }

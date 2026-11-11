@@ -451,6 +451,25 @@ function headTail(text: string, headChars: number, tailChars: number): string {
   return `${points.slice(0, headChars).join('')}\n\n[... 中间内容已省略 ...]\n\n${points.slice(-tailChars).join('')}`
 }
 
+/** 1-hop 依赖提取：参数类型、抛出异常、被继承/引用的声明名，防止模型只看到签名不会传参。 */
+export function deepDependencyLines(text: string): string[] {
+  const names = new Set<string>()
+  const collect = (pattern: RegExp): void => {
+    pattern.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(text)) !== null) {
+      const name = match[1]
+      if (name) names.add(name)
+    }
+  }
+  collect(/:\s*([A-Z][A-Za-z0-9_]*)/g)
+  collect(/throw new ([A-Z][A-Za-z0-9_]*)/g)
+  collect(/^(?:export\s+)?(?:interface|class|type|enum)\s+([A-Z][A-Za-z0-9_]*)/gm)
+  collect(/extends\s+([A-Z][A-Za-z0-9_]*)/g)
+  collect(/implements\s+([A-Z][A-Za-z0-9_]*)/g)
+  return [...names].slice(0, 40).map((name) => `[AST_DEP] ${name}`)
+}
+
 /**
  * 上下文防火墙：超过阈值（默认 250 tokens）的工具输出在进入上下文前，
  * 一律压成「结构化摘要 + 指针」，完整内容由 Admission 落盘后可 read 回读。
@@ -459,28 +478,74 @@ function headTail(text: string, headChars: number, tailChars: number): string {
 export function buildFirewallSummary(
   text: string,
   maxTokens: number,
-): { text: string; tokens: number; tokensBefore: number } {
+): { text: string; tokens: number; tokensBefore: number; protectedLines: number; foldedRuns: number } {
   const budgetChars = Math.max(200, Math.floor(maxTokens * 4))
   const lines = text.split(/\r?\n/)
   const totalLines = lines.length
-  const head = lines.slice(0, 12)
-  const tail = lines.slice(-8)
-  const signals = unique(
-    lines
-      .filter((line) => /\b(error|exception|failed|denied|not found|exit code|timeout|fatal)\b/i.test(line))
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0),
-    8,
-  )
+  const head = lines.slice(0, 8)
+  const tail = lines.slice(-6)
+
+  // 形状保护：报错/警告行必须带 3 行前置上下文（入参、环境、前置调用），
+  // 否则模型只看到 "NullPointerException" 无法定位对象。
+  const signalIndexes = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => /(error|exception|failed|denied|timeout|fatal|warning|typeerror|mismatch|expected)/i.test(line))
+    .slice(0, 6)
+  const windows: string[] = []
+  let protectedLines = 0
+  for (const { index } of signalIndexes) {
+    const slice = lines.slice(Math.max(0, index - 3), Math.min(lines.length, index + 3))
+    protectedLines += slice.length
+    windows.push(...slice)
+  }
+
+  const foldDuplicates = (input: string[]): { lines: string[]; folded: number } => {
+    const output: string[] = []
+    let folded = 0
+    let runLine = ''
+    let runCount = 0
+    const flush = (): void => {
+      if (runCount <= 0) return
+      output.push(runCount > 1 ? `${runLine} ⟨×${runCount}⟩` : runLine)
+      if (runCount > 1) folded += runCount - 1
+      runLine = ''
+      runCount = 0
+    }
+    for (const line of input) {
+      if (line === runLine) {
+        runCount += 1
+        continue
+      }
+      flush()
+      runLine = line
+      runCount = 1
+    }
+    flush()
+    return { lines: output, folded }
+  }
+
+  const foldedWindow = foldDuplicates(windows)
+  const seen = new Set<string>()
+  const deduped: string[] = []
+  for (const line of [...head, '--- 关键窗口 ---', ...foldedWindow.lines, '--- tail ---', ...tail]) {
+    if (seen.has(line)) continue
+    seen.add(line)
+    deduped.push(line)
+  }
+
   const note =
     `[FIREWALL] 原始 ${totalLines} 行 / ~${estimateTokens(text)} tokens 已摘要；` +
+    `保留报错窗口 ${signalIndexes.length} 处（${protectedLines} 行上下文），折叠重复行 ${foldedWindow.folded} 行；` +
     '完整内容已由 Admission 落盘，需要细节请用 read 读取 [ADMISSION] 指针。'
-  const body: string[] = [...head]
-  if (signals.length > 0) body.push('--- errors ---', ...signals)
-  body.push('--- tail ---', ...tail)
-  let summary = `${note}\n${body.join('\n')}`
+  let summary = `${note}\n${deduped.join('\n')}`
   if (summary.length > budgetChars) summary = `${summary.slice(0, budgetChars)}\n[FIREWALL truncated]`
-  return { text: summary, tokens: estimateTokens(summary), tokensBefore: estimateTokens(text) }
+  return {
+    text: summary,
+    tokens: estimateTokens(summary),
+    tokensBefore: estimateTokens(text),
+    protectedLines,
+    foldedRuns: foldedWindow.folded,
+  }
 }
 
 /**
@@ -578,6 +643,12 @@ export function runExtraction(input: { text: string; maxTokens: number; budgetMs
       }
       body = skeleton
       mode = 'ast'
+      // 1-hop 依赖全量保留：签名之外，补回参数类型 / 抛出异常 / 被引用声明名。
+      const dependencies = deepDependencyLines(text)
+      if (dependencies.length > 0) {
+        body = `${body}\n${dependencies.join('\n')}`
+        logEvent('info', 'ast.deep_dependencies', { module: 'Extraction', count: dependencies.length })
+      }
       if (expired()) {
         body = headTail(text, Math.max(1000, Math.floor(text.length * 0.2)), Math.max(1000, Math.floor(text.length * 0.05)))
         mode = 'head-tail'

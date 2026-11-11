@@ -34,6 +34,8 @@ export declare function isBalancedCode(text: string): boolean;
  * 返回 null 表示「不可解析」——调用方必须 Fail-Closed 使用原文本。
  */
 export declare function skeletonize(text: string): string | null;
+/** 1-hop 依赖提取：参数类型、抛出异常、被继承/引用的声明名，防止模型只看到签名不会传参。 */
+export declare function deepDependencyLines(text: string): string[];
 /**
  * 上下文防火墙：超过阈值（默认 250 tokens）的工具输出在进入上下文前，
  * 一律压成「结构化摘要 + 指针」，完整内容由 Admission 落盘后可 read 回读。
@@ -43,6 +45,8 @@ export declare function buildFirewallSummary(text: string, maxTokens: number): {
     text: string;
     tokens: number;
     tokensBefore: number;
+    protectedLines: number;
+    foldedRuns: number;
 };
 /**
  * TOON —— 列式无损重编码（v1.3）。

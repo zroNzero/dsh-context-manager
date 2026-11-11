@@ -155,6 +155,20 @@ function estimateMessagesTokens(messages) {
     }
     return Math.ceil(chars / 4);
 }
+/** 第二层：签名（参数名 + 类型，不含嵌套 schema/描述细节）。 */
+function signatureTool(tool) {
+    const parameters = tool.parameters ?? {};
+    const properties = parameters.properties ?? {};
+    const signatureProperties = {};
+    for (const [key, value] of Object.entries(properties)) {
+        signatureProperties[key] = { type: value?.type ?? 'any' };
+    }
+    return {
+        ...tool,
+        description: (0, tool_attention_1.firstSentence)(tool.description ?? '', 60),
+        parameters: { type: 'object', properties: signatureProperties, required: parameters.required ?? [] },
+    };
+}
 /**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。
  * 失败安全：任何异常原样放行。
@@ -230,15 +244,32 @@ function installSchemaCompressor(ctx, options = {}) {
                     });
                 }
                 if (selection.hidden.length > 0) {
-                    messages = (0, tool_attention_1.withCatalog)(messages, selection.catalog);
+                    const selectedNames = selection.selected.map((tool) => tool.name).filter((name) => name !== 'search_tools');
+                    const fullNames = selectedNames.slice(0, 3);
+                    const signatureNames = selectedNames.slice(3, 10);
+                    const byName = new Map(request.tools.map((tool) => [tool.name, tool]));
+                    const fullTools = fullNames.map((name) => byName.get(name)).filter((tool) => tool !== undefined);
+                    const signatureTools = signatureNames
+                        .map((name) => byName.get(name))
+                        .filter((tool) => tool !== undefined)
+                        .map(signatureTool);
+                    const included = new Set([...fullNames, ...signatureNames, 'search_tools']);
+                    const hiddenTools = request.tools.filter((tool) => !included.has(tool.name));
+                    const catalog = hiddenTools.map((tool) => `- ${tool.name}: ${(0, tool_attention_1.firstSentence)(tool.description ?? '')}`);
+                    const layered = [...fullTools, ...signatureTools, tool_attention_1.SEARCH_TOOLS_DEF];
+                    messages = (0, tool_attention_1.withCatalog)(messages, [
+                        ...catalog,
+                        '[TOOL_NOT_LOADED] 未列出的工具必须先调用 search_tools 拉取完整 schema；直接调用会收到 TOOL_NOT_LOADED 提示。',
+                    ]);
                     options.onToolCatalog?.(request.tools);
-                    attendedTools = selection.selected;
-                    (0, log_1.logEvent)('info', 'tool_attention.filtered', {
+                    attendedTools = layered;
+                    (0, log_1.logEvent)('info', 'tool_attention.layered', {
                         module: 'ToolAttention',
                         total: request.tools.length,
-                        selected: selection.selected.length,
-                        hidden: selection.hidden.length,
-                        tools: selection.selected.map((tool) => tool.name),
+                        full: fullTools.length,
+                        signature: signatureTools.length,
+                        hidden: hiddenTools.length,
+                        fullTools: fullNames,
                     });
                 }
             }
