@@ -191,9 +191,13 @@ function decideEffort(input) {
         }
         else {
             desired = oneNotchDown(desired);
-            // hard 任务的执行步也不低于 low：多步重构仍需要连贯判断。
-            if (turn.tier === 'hard' && RANK[desired] < RANK['low'])
-                desired = 'low';
+            // 实测（同 prompt 四档配对）：max→high 砍掉 43% 输出，而 high→low 几乎省不到钱
+            // （平均 output 344 vs 357）。所以真正干活的步骤不该掉到 low —— 花一样的钱、
+            // 少一半思考。只有 trivial/easy 这类机械轮次才允许到 off。
+            if (turn.tier === 'normal' || turn.tier === 'hard') {
+                if (RANK[desired] < RANK['high'])
+                    desired = 'high';
+            }
             reason = `${turn.reason}:execute`;
         }
     }

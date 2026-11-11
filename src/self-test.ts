@@ -551,7 +551,8 @@ check('effort.dynamic-policy', () => {
     policy,
   })
   assert(executing.effort === 'high' && executing.reason.endsWith(':execute'), `execution step must drop a notch, got ${executing.effort}`)
-  const lowPlan = decideEffort({
+  // 执行步兜底：normal/hard 轮次不会掉到 high 以下（校准实测 high→low 省不到钱）
+  const floored = decideEffort({
     messages: [
       ...hardPrompt,
       { role: 'tool', content: [{ type: 'text', text: 'ok' }] },
@@ -560,7 +561,19 @@ check('effort.dynamic-policy', () => {
     baseline: 'max',
     policy: { ...policy, hard: 'low' as const },
   })
-  assert(lowPlan.effort === 'off' || lowPlan.effort === 'low', `execution step must stay sane, got ${lowPlan.effort}`)
+  assert(floored.effort === 'high', `hard execution must not sink below high, got ${floored.effort}`)
+
+  // 机械轮次的执行步可以到 off —— 那里才是真省
+  const mechanical = decideEffort({
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: '把这段 JSON 格式化一下' }] },
+      { role: 'tool', content: [{ type: 'text', text: 'ok' }] },
+    ],
+    requested: 'max',
+    baseline: 'max',
+    policy,
+  })
+  assert(mechanical.effort === 'off', `trivial execution should run at off, got ${mechanical.effort}`)
 })
 
 // ---------------------------------------------------------------------------
