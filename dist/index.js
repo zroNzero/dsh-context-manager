@@ -67,6 +67,7 @@ const savings_ledger_1 = require("./modules/savings-ledger");
 const billing_1 = require("./modules/billing");
 const workspace_1 = require("./modules/workspace");
 const history_rewriter_1 = require("./modules/history-rewriter");
+const prefix_spill_1 = require("./modules/prefix-spill");
 const response_cache_1 = require("./modules/response-cache");
 const tool_pipe_1 = require("./modules/tool-pipe");
 const pricing_1 = require("./modules/pricing");
@@ -106,6 +107,14 @@ exports.Config = zod_1.z.object({
     rewriteRetainRecent: zod_1.z.number().int().positive().default(8),
     rewriteToolChars: zod_1.z.number().int().positive().default(700),
     rewriteAssistantChars: zod_1.z.number().int().positive().default(400),
+    /**
+     * 前缀无损折叠（v1.3）：把「最近 N 条之外」的旧工具结果整段落盘，上下文里只留
+     * 「收据 + 绝对路径 + 头部摘要」。**不丢信息**（模型可 read 回来），因此默认开。
+     * 实测一次请求里旧工具结果占 38.7%，而 hit 占账单 50.6%——这是目前最大的杠杆。
+     */
+    prefixSpillEnabled: zod_1.z.boolean().default(true),
+    prefixSpillRetainRecent: zod_1.z.number().int().nonnegative().default(6),
+    prefixSpillMinChars: zod_1.z.number().int().positive().default(600),
     /** 精确哈希响应缓存（v1.2）：同一请求 5 分钟内直接重放。 */
     responseCacheEnabled: zod_1.z.boolean().default(true),
     responseCacheTtlMs: zod_1.z.number().int().positive().default(300_000),
@@ -732,16 +741,39 @@ function apply(ctx, rawConfig = {}) {
         const dispose = (0, schema_index_1.installSchemaCompressor)({ llm, get: () => undefined }, {
             enabled: true,
             maxDescriptionChars: 120,
-            rewriteHistory: config.rewriteEnabled
-                ? (messages) => 
-                // 固定预算（只取配置值）：重写结果必须是「消息内容」的纯函数。
-                // 一旦按实时 token 数漂移，旧消息每次被截成不同长度 -> 前缀失效 ->
-                // provider 缓存整段作废，按 miss 价重算（¥1/M vs ¥0.02/M）。
-                (0, history_rewriter_1.rewriteMessages)(messages, {
-                    retainRecent: config.rewriteRetainRecent,
-                    assistantChars: config.rewriteAssistantChars,
-                    toolChars: config.rewriteToolChars,
-                })
+            rewriteHistory: config.prefixSpillEnabled
+                ? (messages) => {
+                    /**
+                     * 前缀无损折叠：旧工具结果整段落盘，上下文只留「收据 + 绝对路径 + 摘要」。
+                     * 实测一次请求的 650K 字符预算里旧工具结果占 251K（38.7%），而它们每个
+                     * 请求都要按缓存价重读一遍（hit 占账单 50.6%）。落盘后可读回，不丢信息。
+                     *
+                     * 必须先于 rewriteMessages：后者会按字符截断，一旦先截断就没法再落盘了。
+                     */
+                    const folded = (0, prefix_spill_1.foldOldToolResults)(Array.isArray(messages) ? messages : [], {
+                        spillDir: config.spillDir,
+                        retainRecent: config.prefixSpillRetainRecent,
+                        minChars: config.prefixSpillMinChars,
+                    });
+                    if (!config.rewriteEnabled) {
+                        const before = (0, contracts_1.estimateTokens)(JSON.stringify(messages));
+                        return {
+                            messages: folded.messages,
+                            beforeTokens: before,
+                            afterTokens: (0, contracts_1.estimateTokens)(JSON.stringify(folded.messages)),
+                            saved: Math.max(0, folded.stats.charsBefore - folded.stats.charsAfter),
+                            rewritten: folded.stats.folded,
+                        };
+                    }
+                    // 固定预算（只取配置值）：重写结果必须是「消息内容」的纯函数。
+                    // 一旦按实时 token 数漂移，旧消息每次被截成不同长度 -> 前缀失效 ->
+                    // provider 缓存整段作废，按 miss 价重算（¥1/M vs ¥0.02/M）。
+                    return (0, history_rewriter_1.rewriteMessages)(folded.messages, {
+                        retainRecent: config.rewriteRetainRecent,
+                        assistantChars: config.rewriteAssistantChars,
+                        toolChars: config.rewriteToolChars,
+                    });
+                }
                 : undefined,
             responseCache: config.responseCacheEnabled ? responseCache : undefined,
             onCacheHit: () => (0, log_1.logEvent)('info', 'cache.response_hit', responseCache.stats()),

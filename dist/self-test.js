@@ -10,6 +10,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const node_fs_1 = __importDefault(require("node:fs"));
+const node_os_1 = __importDefault(require("node:os"));
 const node_path_1 = __importDefault(require("node:path"));
 const cacheAnchor_1 = require("./cacheAnchor");
 const extraction_1 = require("./modules/extraction");
@@ -20,6 +21,7 @@ const osiris_1 = require("./modules/osiris");
 const tool_pipe_1 = require("./modules/tool-pipe");
 const contracts_1 = require("./contracts");
 const history_rewriter_1 = require("./modules/history-rewriter");
+const prefix_spill_1 = require("./modules/prefix-spill");
 const memory_1 = require("./modules/memory");
 const host_sim_1 = require("./host-sim");
 const savings_ledger_1 = require("./modules/savings-ledger");
@@ -568,6 +570,33 @@ check('billing.effort-counterfactual', () => {
         afterChars: 1000,
     });
     assert(unknown.avoidedOutputTokens === 0, 'missing effort must not invent a counterfactual');
+});
+// ---------------------------------------------------------------------------
+// 25) 前缀无损折叠：旧工具结果落盘 + 收据可读回，且必须字节确定（保证前缀缓存命中）
+// ---------------------------------------------------------------------------
+check('prefix.spill-lossless-and-deterministic', () => {
+    const dir = node_fs_1.default.mkdtempSync(node_path_1.default.join(node_os_1.default.tmpdir(), 'ck-prefix-'));
+    const big = 'ERROR at line 42\n'.repeat(200);
+    const messages = [
+        { role: 'user', content: [{ type: 'text', text: 'start' }] },
+        { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'pwsh', arguments: '{}' }] },
+        { role: 'tool', content: [{ type: 'text', text: big }] },
+        { role: 'user', content: [{ type: 'text', text: 'recent-1' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'recent-2' }] },
+    ];
+    const options = { spillDir: dir, retainRecent: 2, minChars: 500 };
+    const first = (0, prefix_spill_1.foldOldToolResults)(messages, options);
+    const second = (0, prefix_spill_1.foldOldToolResults)(messages, options);
+    assert(first.stats.folded === 1, `only the old tool result folds, got ${first.stats.folded}`);
+    assert(first.messages.length === messages.length, 'message count must not change (tool pairing)');
+    assert(first.messages[1].content[0].type === 'tool-call', 'assistant tool-call must stay intact');
+    assert(first.messages[2].content[0].text.includes('[PREFIX-SPILL]'), 'receipt missing');
+    assert(first.messages[3].content[0].text === 'recent-1', 'recent messages must stay verbatim');
+    assert(first.messages[2].content[0].text === second.messages[2].content[0].text, 'receipt must be byte-identical across calls, or the prefix cache dies');
+    // 收据里的路径必须真能读回原文（这才是「无损」）
+    const file = first.stats.files[0];
+    assert(node_fs_1.default.existsSync(file), `spilled file missing: ${file}`);
+    assert(node_fs_1.default.readFileSync(file, 'utf8') === big, 'spilled content must equal the original byte for byte');
 });
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {

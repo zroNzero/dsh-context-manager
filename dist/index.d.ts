@@ -29,6 +29,9 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     rewriteRetainRecent: z.ZodDefault<z.ZodNumber>;
     rewriteToolChars: z.ZodDefault<z.ZodNumber>;
     rewriteAssistantChars: z.ZodDefault<z.ZodNumber>;
+    prefixSpillEnabled: z.ZodDefault<z.ZodBoolean>;
+    prefixSpillRetainRecent: z.ZodDefault<z.ZodNumber>;
+    prefixSpillMinChars: z.ZodDefault<z.ZodNumber>;
     responseCacheEnabled: z.ZodDefault<z.ZodBoolean>;
     responseCacheTtlMs: z.ZodDefault<z.ZodNumber>;
     outputGuardEnabled: z.ZodDefault<z.ZodBoolean>;

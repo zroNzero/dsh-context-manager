@@ -39,6 +39,7 @@ import { SavingsLedger } from './modules/savings-ledger'
 import { BillingLedger } from './modules/billing'
 import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modules/workspace'
 import { rewriteMessages } from './modules/history-rewriter'
+import { foldOldToolResults } from './modules/prefix-spill'
 import { ResponseCache } from './modules/response-cache'
 import { ToolPipe } from './modules/tool-pipe'
 import { priceFor, pricingLoadedLog } from './modules/pricing'
@@ -80,6 +81,14 @@ export const Config = z.object({
   rewriteRetainRecent: z.number().int().positive().default(8),
   rewriteToolChars: z.number().int().positive().default(700),
   rewriteAssistantChars: z.number().int().positive().default(400),
+  /**
+   * 前缀无损折叠（v1.3）：把「最近 N 条之外」的旧工具结果整段落盘，上下文里只留
+   * 「收据 + 绝对路径 + 头部摘要」。**不丢信息**（模型可 read 回来），因此默认开。
+   * 实测一次请求里旧工具结果占 38.7%，而 hit 占账单 50.6%——这是目前最大的杠杆。
+   */
+  prefixSpillEnabled: z.boolean().default(true),
+  prefixSpillRetainRecent: z.number().int().nonnegative().default(6),
+  prefixSpillMinChars: z.number().int().positive().default(600),
   /** 精确哈希响应缓存（v1.2）：同一请求 5 分钟内直接重放。 */
   responseCacheEnabled: z.boolean().default(true),
   responseCacheTtlMs: z.number().int().positive().default(300_000),
@@ -709,16 +718,39 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     const dispose = installSchemaCompressor({ llm, get: () => undefined } as any, {
       enabled: true,
       maxDescriptionChars: 120,
-      rewriteHistory: config.rewriteEnabled
-        ? (messages: any) =>
+      rewriteHistory: config.prefixSpillEnabled
+        ? (messages: any) => {
+            /**
+             * 前缀无损折叠：旧工具结果整段落盘，上下文只留「收据 + 绝对路径 + 摘要」。
+             * 实测一次请求的 650K 字符预算里旧工具结果占 251K（38.7%），而它们每个
+             * 请求都要按缓存价重读一遍（hit 占账单 50.6%）。落盘后可读回，不丢信息。
+             *
+             * 必须先于 rewriteMessages：后者会按字符截断，一旦先截断就没法再落盘了。
+             */
+            const folded = foldOldToolResults(Array.isArray(messages) ? messages : [], {
+              spillDir: config.spillDir,
+              retainRecent: config.prefixSpillRetainRecent,
+              minChars: config.prefixSpillMinChars,
+            })
+            if (!config.rewriteEnabled) {
+              const before = estimateTokens(JSON.stringify(messages))
+              return {
+                messages: folded.messages,
+                beforeTokens: before,
+                afterTokens: estimateTokens(JSON.stringify(folded.messages)),
+                saved: Math.max(0, folded.stats.charsBefore - folded.stats.charsAfter),
+                rewritten: folded.stats.folded,
+              }
+            }
             // 固定预算（只取配置值）：重写结果必须是「消息内容」的纯函数。
             // 一旦按实时 token 数漂移，旧消息每次被截成不同长度 -> 前缀失效 ->
             // provider 缓存整段作废，按 miss 价重算（¥1/M vs ¥0.02/M）。
-            rewriteMessages(messages, {
+            return rewriteMessages(folded.messages, {
               retainRecent: config.rewriteRetainRecent,
               assistantChars: config.rewriteAssistantChars,
               toolChars: config.rewriteToolChars,
             })
+          }
         : undefined,
       responseCache: config.responseCacheEnabled ? responseCache : undefined,
       onCacheHit: () => logEvent('info', 'cache.response_hit', responseCache.stats()),
