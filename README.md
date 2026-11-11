@@ -124,7 +124,7 @@ dsh install D:\path\to\dsh-context-manager
         keepaliveEnabled: true         # 缓存过期前重放前缀续命（TTL 默认 240s，最多 4 次）
         keepaliveTtlMs: 240000
         keepaliveRefreshes: 4
-        keepaliveMinPromptTokens: 8000
+        keepaliveMinPromptTokens: 500   # 收益与 prompt 量级成正比，阈值只需挡掉微不足道的请求
         outputGuardEnabled: false       # 会砍掉正常回答（首个代码块/JSON 闭合即停），默认关
         localBaseUrl: http://127.0.0.1:11434
         compressionBudgetMs: 50

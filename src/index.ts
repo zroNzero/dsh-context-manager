@@ -101,7 +101,7 @@ export const Config = z.object({
   keepaliveEnabled: z.boolean().default(true),
   keepaliveTtlMs: z.number().int().positive().default(240_000),
   keepaliveRefreshes: z.number().int().min(0).max(24).default(4),
-  keepaliveMinPromptTokens: z.number().int().positive().default(8_000),
+  keepaliveMinPromptTokens: z.number().int().positive().default(500),
   /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
   /**
    * 动态工具集（Tool Attention 分层）默认关闭 —— 与 keepalive 直接冲突。
