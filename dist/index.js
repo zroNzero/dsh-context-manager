@@ -121,7 +121,7 @@ exports.Config = zod_1.z.object({
      * 45%），而模型真正需要的是「我调了什么工具」+「结果是什么」，不是当初那段长脚本文本。
      * 参数落盘后替换成合法 JSON 收据（_spilled/_chars/_head），id 与 name 原样保留。
      */
-    prefixSpillMinArgChars: zod_1.z.number().int().positive().default(320),
+    prefixSpillHeadChars: zod_1.z.number().int().positive().default(100),
     /**
      * 丢掉「最近 N 条之外」的历史 thinking（约占前缀 1/3）。
      * auto：启动后先发两条一次性探针，只有对照组和删除组都成功才开启；denied/inconclusive
@@ -800,7 +800,7 @@ function apply(ctx, rawConfig = {}) {
                         spillDir: config.spillDir,
                         retainRecent: config.prefixSpillRetainRecent,
                         minChars: config.prefixSpillMinChars,
-                        minArgChars: config.prefixSpillMinArgChars,
+                        headChars: config.prefixSpillHeadChars,
                     });
                     const finish = (next) => {
                         if (config.rewriteEnabled) {

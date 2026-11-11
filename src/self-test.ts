@@ -745,17 +745,19 @@ check('prefix.spill-preserves-tool-call-json', () => {
     { role: 'user', content: [{ type: 'text', text: 'recent' }] },
     { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
   ]
-  const { messages: out, stats } = foldOldToolResults(messages, { spillDir: dir, retainRecent: 2, minArgChars: 200 })
+  const { messages: out, stats } = foldOldToolResults(messages, { spillDir: dir, retainRecent: 2 })
 
-  assert(stats.foldedArgs === 1, `args must fold, got ${stats.foldedArgs}`)
+  // 真事故：把参数换成收据后，模型会照着历史把自己的调用也写成收据，
+  // 于是宿主拿到 {"_spill":...} 当参数 → MALFORMED_RESPONSE。
+  // assistant 的工具调用是模型的模仿模板，一个字节都不许动。
+  assert(!('foldedArgs' in stats), 'there must be no way to fold arguments at all')
   const block = out[1].content[0]
   assert(block.id === 'call_42', 'tool-call id must survive: it is the pairing key')
   assert(block.name === 'pwsh', 'tool-call name must survive: it is the intent')
-  assert(typeof block.arguments === 'string', 'arguments must stay a string')
-  const parsed = JSON.parse(block.arguments)
-  assert(typeof parsed._spill === 'string' && !parsed._spill.includes('\\'), 'receipt must carry the bare file name (the dir lives in the prompt)')
-  assert(parsed._chars === longArgs.length, 'receipt must record the original size')
-  assert(fs.readFileSync(path.join(dir, parsed._spill), 'utf8') === longArgs, 'spilled args must be byte-exact')
+  assert(
+    block.arguments === longArgs,
+    'assistant tool-call arguments must be byte-identical: history is the imitation template',
+  )
 })
 
 const failed = outcomes.filter((item) => !item.ok)
