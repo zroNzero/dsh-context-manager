@@ -23,11 +23,58 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.assertToolPairing = assertToolPairing;
 exports.evictOldEpisodes = evictOldEpisodes;
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const contracts_1 = require("../contracts");
 const CALL_TYPES = new Set(['tool-call']);
+/**
+ * 配对完整性硬校验（Fail-Closed 的唯一依据）。
+ *
+ * 线上事故（2026-11-11 15:00Z）：逐出后整轮报
+ * `INVALID_REQUEST: tool_use ids were found without tool_result blocks immediately after`。
+ * 教训：任何「删消息」的优化都必须先能证明配对没被破坏，否则收益再大也不能上线。
+ *
+ * 检查两个方向：
+ *   1. 每个 tool-call 的 id，必须在它**之后**存在同名 tool 结果；
+ *   2. 每个 tool 结果，必须在它**之前**存在同名 tool-call。
+ * 注意结果通常出现 caller 语境里，两方向都查才能真正排除孤儿。
+ */
+function assertToolPairing(messages) {
+    if (!Array.isArray(messages))
+        return false;
+    const callAt = new Map();
+    const resultAt = new Map();
+    messages.forEach((message, index) => {
+        if (message?.role === 'tool') {
+            const id = String(message?.toolCallId ?? message?.tool_call_id ?? '');
+            if (id)
+                resultAt.set(id, index);
+            return;
+        }
+        if (!Array.isArray(message?.content))
+            return;
+        for (const block of message.content) {
+            if (!CALL_TYPES.has(String(block?.type ?? '')))
+                continue;
+            const id = String(block?.id ?? '');
+            if (id)
+                callAt.set(id, index);
+        }
+    });
+    for (const [id, index] of callAt) {
+        const result = resultAt.get(id);
+        if (result === undefined || result < index)
+            return false;
+    }
+    for (const [id, index] of resultAt) {
+        const call = callAt.get(id);
+        if (call === undefined || call > index)
+            return false;
+    }
+    return true;
+}
 function argText(value) {
     if (typeof value === 'string')
         return value;
@@ -77,11 +124,14 @@ function evictOldEpisodes(messages, options) {
         const calls = message.content.filter((block) => CALL_TYPES.has(String(block?.type ?? '')));
         if (calls.length === 0)
             continue;
-        // 只逐出「参数很大」的调用；小调用留在历史里，保留最近的操作脉络。
+        /**
+         * 只在「这条 assistant 的所有调用都能逐出」时才动它。
+         * 部分逐出会把一条消息切成「一半调用 + 指针」，是配对破坏的高危形态。
+         */
         const bulk = calls.filter((block) => argText(block?.arguments).length > minArgChars);
-        if (bulk.length === 0)
+        if (bulk.length !== calls.length)
             continue;
-        // 全部大调用都必须有对应的 tool 结果，否则不能删（会留孤儿）。
+        // 全部调用都必须有对应的 tool 结果，否则不能删（会留孤儿）。
         if (bulk.some((block) => !resultIndex.has(String(block?.id ?? ''))))
             continue;
         const matchedResults = bulk.map((block) => resultIndex.get(String(block?.id ?? '')));
@@ -123,5 +173,13 @@ function evictOldEpisodes(messages, options) {
     }
     if (stats.episodes === 0)
         return { messages, stats };
-    return { messages: out.filter((_message, index) => !drop.has(index)), stats };
+    const pruned = out.filter((_message, index) => !drop.has(index));
+    /**
+     * Fail-Closed：只要配对校验不通过，就原样返回**未改动**的消息。
+     * 宁可这一轮一分钱不省，也不能让宿主拿到一份会被它拒绝的消息表。
+     */
+    if (!assertToolPairing(pruned)) {
+        return { messages, stats: { episodes: 0, droppedMessages: 0, charsSaved: 0, files: [] } };
+    }
+    return { messages: pruned, stats };
 }

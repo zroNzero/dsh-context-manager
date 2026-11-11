@@ -98,12 +98,14 @@ export const Config = z.object({
    */
   prefixSpillHeadChars: z.number().int().positive().default(100),
   /**
-   * 已完成工具调用「整对逐出」（武器库 #14/#15）。`write`/`edit` 的参数里装着整个
-   * 文件内容（实测占 tool-call 参数 70%），而那文件早已在磁盘上。
-   * 逐出时把「调用 + 结果」成对移除并落盘，assistant 里只留一行纯文本指针：
-   * 既不留下模仿模板（v1.4 的 MALFORMED_RESPONSE 就是这么来的），也不留孤儿 tool 消息。
+   * 已完成工具调用「整对逐出」（武器库 #14/#15）。
+   *
+   * **默认关闭**：2026-11-11 15:00Z 线上实测，逐出 116 个 episode 后整轮报
+   * `INVALID_REQUEST: tool_use ids were found without tool_result blocks
+   * immediately after`。配对完整性比省的钱重要得多——一次断轮的成本远超几轮省下的。
+   * 重新启用前必须先让 `assertToolPairing` 在长会话上零告警。
    */
-  episodeEvictEnabled: z.boolean().default(true),
+  episodeEvictEnabled: z.boolean().default(false),
   episodeEvictRetainRecent: z.number().int().nonnegative().default(8),
   episodeEvictMinArgChars: z.number().int().positive().default(600),
   /**

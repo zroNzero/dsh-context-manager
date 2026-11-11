@@ -31,6 +31,19 @@ export interface EpisodeEvictStats {
     charsSaved: number;
     files: string[];
 }
+/**
+ * 配对完整性硬校验（Fail-Closed 的唯一依据）。
+ *
+ * 线上事故（2026-11-11 15:00Z）：逐出后整轮报
+ * `INVALID_REQUEST: tool_use ids were found without tool_result blocks immediately after`。
+ * 教训：任何「删消息」的优化都必须先能证明配对没被破坏，否则收益再大也不能上线。
+ *
+ * 检查两个方向：
+ *   1. 每个 tool-call 的 id，必须在它**之后**存在同名 tool 结果；
+ *   2. 每个 tool 结果，必须在它**之前**存在同名 tool-call。
+ * 注意结果通常出现 caller 语境里，两方向都查才能真正排除孤儿。
+ */
+export declare function assertToolPairing(messages: any[]): boolean;
 export declare function evictOldEpisodes(messages: any[], options: EpisodeEvictOptions): {
     messages: any[];
     stats: EpisodeEvictStats;

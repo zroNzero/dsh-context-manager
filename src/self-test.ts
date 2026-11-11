@@ -18,7 +18,7 @@ import { ToolPipe } from './modules/tool-pipe'
 import { estimateTokens } from './contracts'
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
-import { evictOldEpisodes } from './modules/episode-evict'
+import { evictOldEpisodes, assertToolPairing } from './modules/episode-evict'
 import { stripStaleReasoning } from './modules/reasoning-drop'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
@@ -807,6 +807,32 @@ check('prefix.spill-preserves-tool-call-json', () => {
     block.arguments === longArgs,
     'assistant tool-call arguments must be byte-identical: history is the imitation template',
   )
+})
+
+// ---------------------------------------------------------------------------
+// 28) 配对校验器：孤儿调用 / 孤儿结果都必须被判否（线上 INVALID_REQUEST 的回归）
+// ---------------------------------------------------------------------------
+
+check('prefix.tool-pairing-validator', () => {
+  const call = (id: string) => ({ type: 'tool-call', id, name: 'read', arguments: '{}' })
+  const ok = [
+    { role: 'user', content: [{ type: 'text', text: 'go' }] },
+    { role: 'assistant', content: [call('a')] },
+    { role: 'tool', toolCallId: 'a', content: [{ type: 'text', text: 'r' }] },
+  ]
+  assert(assertToolPairing(ok), 'a matched pair must pass')
+
+  // 线上事故形态：调用还在，结果被删掉了
+  const orphanCall = [ok[0], ok[1]]
+  assert(!assertToolPairing(orphanCall), 'a call without its result must fail')
+
+  // 反向：结果还在，调用被删掉了
+  const orphanResult = [ok[0], ok[2]]
+  assert(!assertToolPairing(orphanResult), 'a result without its call must fail')
+
+  // 顺序颠倒
+  const reversed = [ok[0], ok[2], ok[1]]
+  assert(!assertToolPairing(reversed), 'result before call must fail')
 })
 
 const failed = outcomes.filter((item) => !item.ok)

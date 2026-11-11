@@ -687,6 +687,27 @@ check('prefix.spill-preserves-tool-call-json', () => {
     assert(block.name === 'pwsh', 'tool-call name must survive: it is the intent');
     assert(block.arguments === longArgs, 'assistant tool-call arguments must be byte-identical: history is the imitation template');
 });
+// ---------------------------------------------------------------------------
+// 28) 配对校验器：孤儿调用 / 孤儿结果都必须被判否（线上 INVALID_REQUEST 的回归）
+// ---------------------------------------------------------------------------
+check('prefix.tool-pairing-validator', () => {
+    const call = (id) => ({ type: 'tool-call', id, name: 'read', arguments: '{}' });
+    const ok = [
+        { role: 'user', content: [{ type: 'text', text: 'go' }] },
+        { role: 'assistant', content: [call('a')] },
+        { role: 'tool', toolCallId: 'a', content: [{ type: 'text', text: 'r' }] },
+    ];
+    assert((0, episode_evict_1.assertToolPairing)(ok), 'a matched pair must pass');
+    // 线上事故形态：调用还在，结果被删掉了
+    const orphanCall = [ok[0], ok[1]];
+    assert(!(0, episode_evict_1.assertToolPairing)(orphanCall), 'a call without its result must fail');
+    // 反向：结果还在，调用被删掉了
+    const orphanResult = [ok[0], ok[2]];
+    assert(!(0, episode_evict_1.assertToolPairing)(orphanResult), 'a result without its call must fail');
+    // 顺序颠倒
+    const reversed = [ok[0], ok[2], ok[1]];
+    assert(!(0, episode_evict_1.assertToolPairing)(reversed), 'result before call must fail');
+});
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {
     process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'} ${item.name} :: ${item.detail}\n`);
