@@ -99,6 +99,22 @@ export interface BillingSnapshot {
     } | null;
     updatedAt: string;
 }
+/**
+ * provider 的 `cacheReadTokens` 是**会话累计值**，不是单请求值。
+ *
+ * 实测证据（2026-11-11，会话 794b93ff 重启后的连续请求）：usage chunk 里的原始值是
+ * 262016 → 262400 → 262912 → 263296 → 264960，而宿主会话日志里同一批请求的
+ * `assistant/message.usage.cacheReadTokens` 恰好也是这几个值（累计列）。
+ * 也就是说上游给的就是累计数，直接当单请求命中会让每次请求虚增约 26 万 hit token。
+ *
+ * 用法：同一个 sessionId 顺序调用 normalize()，拿返回值当单请求命中。
+ * 若数值回退（换了 provider 会话/上下文重置），按新序列重新起算。
+ */
+export declare class CacheReadNormalizer {
+    private readonly seen;
+    normalize(sessionId: string, raw: number): number;
+    reset(sessionId?: string): void;
+}
 export declare class BillingLedger {
     private readonly records;
     private noReduction;

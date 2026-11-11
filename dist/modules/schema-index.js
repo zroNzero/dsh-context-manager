@@ -22,6 +22,7 @@ exports.installSchemaCompressor = installSchemaCompressor;
 exports.schemaTokens = schemaTokens;
 const contracts_1 = require("../contracts");
 const log_1 = require("../log");
+const billing_js_1 = require("./billing.js");
 const response_cache_1 = require("./response-cache");
 const tool_attention_1 = require("./tool-attention");
 const scope_1 = require("./scope");
@@ -398,6 +399,9 @@ function installSchemaCompressor(ctx, options = {}) {
     // 按 session 分开：主 Agent 与多个 subagent 是不同上下文，共用一个槽位会互相顶掉，
     // 保活就只对「最后一个说话的人」生效。同时限制总的会话数，避免一堆 subagent 各自烧保活费。
     const keepaliveSlots = new Map();
+    // provider �?cacheReadTokens 是会话累计值（已用宿主日志交叉验证：usage chunk 的原始值
+    // 与日志里的累计列完全一致），所有记�?阈值都必须用差分。
+    const cacheRead = new billing_js_1.CacheReadNormalizer();
     const maxKeepaliveSessions = Math.max(1, Math.trunc(keepaliveCfg?.maxSessions ?? 3));
     let disposed = false;
     const cancelSlot = (slot) => {
@@ -458,7 +462,7 @@ function installSchemaCompressor(ctx, options = {}) {
             for await (const chunk of stream) {
                 if (chunk?.type !== 'usage' || !chunk.usage)
                     continue;
-                cached = Math.max(0, chunk.usage.cacheReadTokens ?? 0);
+                cached = cacheRead.normalize(String(optimized?.sessionId ?? 'default'), chunk.usage.cacheReadTokens ?? 0);
                 fresh = Math.max(0, chunk.usage.inputTokens ?? 0);
                 promptTokens = cached + fresh;
                 // 保活本身就是真实支出，必须进账本（压缩前后字符相同 -> 零削减，只计成本）。
@@ -467,7 +471,7 @@ function installSchemaCompressor(ctx, options = {}) {
                         options.onUsage({
                             purpose: 'cache-keepalive',
                             model: String(optimized?.model ?? ''),
-                            usage: chunk.usage,
+                            usage: { ...chunk.usage, cacheReadTokens: cached },
                             beforeChars: 0,
                             afterChars: 0,
                         });
@@ -497,6 +501,7 @@ function installSchemaCompressor(ctx, options = {}) {
         if (chunk?.type !== 'usage' || !chunk.usage)
             return;
         const isKeepalive = optimized?.purpose === 'cache-keepalive';
+        const hitDelta = cacheRead.normalize(String(optimized?.sessionId ?? 'default'), chunk.usage.cacheReadTokens ?? 0);
         if (!isKeepalive && keepaliveCfg?.enabled) {
             // 真实请求发出去了：它自己会刷新缓存，先撤掉这个会话挂起的保活。
             const key = String(optimized?.sessionId ?? 'default');
@@ -511,7 +516,7 @@ function installSchemaCompressor(ctx, options = {}) {
                     request: optimized,
                     promptTokens: 0,
                 });
-                const promptTokens = (chunk.usage.inputTokens ?? 0) + (chunk.usage.cacheReadTokens ?? 0);
+                const promptTokens = (chunk.usage.inputTokens ?? 0) + hitDelta;
                 armKeepalive(key, invoke, optimized, promptTokens);
             }
         }
@@ -521,7 +526,7 @@ function installSchemaCompressor(ctx, options = {}) {
             options.onUsage({
                 purpose: String(optimized?.purpose ?? 'agent-loop'),
                 model: String(optimized?.model ?? ''),
-                usage: chunk.usage,
+                usage: { ...chunk.usage, cacheReadTokens: hitDelta },
                 beforeChars,
                 afterChars,
             });

@@ -150,11 +150,14 @@ async function main() {
     });
     await check('billing captures provider usage from the live stream', async () => {
         const seen = [];
+        let cumulativeHit = 0;
         const llm = {
             stream(_request) {
+                cumulativeHit += 800;
+                const snapshot = cumulativeHit;
                 return (async function* () {
                     yield { type: 'text-delta', index: 0, text: 'ok' };
-                    yield { type: 'usage', usage: { inputTokens: 1200, cacheReadTokens: 800, outputTokens: 340 } };
+                    yield { type: 'usage', usage: { inputTokens: 1200, cacheReadTokens: snapshot, outputTokens: 340 } };
                     yield { type: 'finish', reason: { kind: 'stop' } };
                 })();
             },
@@ -170,28 +173,36 @@ async function main() {
             onUsage: (info) => seen.push(info),
         });
         try {
-            const stream = llm.stream({
+            const request = {
                 provider: 'deepseek-account',
                 model: 'deepseek-flash',
                 purpose: 'agent-loop',
+                sessionId: 'billing-session',
                 messages: [{ role: 'user', content: [{ type: 'text', text: '分析' }] }],
                 tools: billingTools,
-            });
-            for await (const _chunk of stream) {
-                /* drain: usage 只在消费时才可见 */
+            };
+            // 第一次：provider 的 cacheReadTokens 是会话累计值，第一次出现只能当基线
+            for await (const _chunk of llm.stream(request)) {
+                /* drain */
+            }
+            // 第二次：累计值上涨 -> 记账拿到的应该是差分
+            for await (const _chunk of llm.stream(request)) {
+                /* drain */
             }
         }
         finally {
             dispose();
         }
-        assert(seen.length === 1, `usage callback fired ${seen.length} times`);
-        const info = seen[0];
-        assert(info.usage.inputTokens === 1200 && info.usage.cacheReadTokens === 800, 'usage passthrough broken');
-        assert(info.purpose === 'agent-loop', `purpose lost: ${info.purpose}`);
-        assert(info.beforeChars > info.afterChars, `payload chars not reduced: ${info.beforeChars}->${info.afterChars}`);
+        assert(seen.length === 2, `usage callback fired ${seen.length} times`);
+        assert(seen[0].usage.cacheReadTokens === 0, 'first sighting must book zero hits (no observable baseline)');
+        assert(seen[1].usage.cacheReadTokens === 800, `per-request hit must be the delta, got ${seen[1].usage.cacheReadTokens}`);
+        assert(seen[1].usage.inputTokens === 1200 && seen[1].usage.outputTokens === 340, 'usage passthrough broken');
+        assert(seen[1].purpose === 'agent-loop', `purpose lost: ${seen[1].purpose}`);
+        assert(seen[1].beforeChars > seen[1].afterChars, `payload chars not reduced: ${seen[1].beforeChars}->${seen[1].afterChars}`);
         const ledger = new billing_1.BillingLedger();
-        const record = ledger.record(info);
+        const record = ledger.record(seen[1]);
         assert(record !== null, 'billing refused a real usage record');
+        assert(record.hitTokens === 800, `ledger must book 800 hit tokens, got ${record.hitTokens}`);
         assert(record.actualCost > 0, 'real cost must be positive');
         assert(record.removedPromptTokens > 0, 'measured removal must be positive after schema compression');
         assert(ledger.snapshot().reduction > 0, 'reduction must be positive');
@@ -538,7 +549,7 @@ async function main() {
         };
         const dispose = (0, schema_index_1.installSchemaCompressor)({ llm }, {
             enabled: true,
-            keepalive: { enabled: true, ttlMs: 30, refreshes: 2, minPromptTokens: 1000, marginRatio: 0.5, minDelayMs: 15 },
+            keepalive: { enabled: true, ttlMs: 30, refreshes: 2, minPromptTokens: 100, marginRatio: 0.5, minDelayMs: 15 },
         });
         try {
             const payload = {
@@ -637,7 +648,7 @@ async function main() {
         };
         const dispose = (0, schema_index_1.installSchemaCompressor)({ llm }, {
             enabled: true,
-            keepalive: { enabled: true, ttlMs: 30, refreshes: 1, minPromptTokens: 1000, marginRatio: 0.5, minDelayMs: 15, maxSessions: 3 },
+            keepalive: { enabled: true, ttlMs: 30, refreshes: 1, minPromptTokens: 100, marginRatio: 0.5, minDelayMs: 15, maxSessions: 3 },
         });
         try {
             const send = async (sessionId, text) => {

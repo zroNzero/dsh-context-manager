@@ -397,6 +397,32 @@ check('cache.semantic-replay-off-by-default', () => {
     open.set('k1', chunks, 'deepseek-flash 继续  [tools]');
     assert(open.findSimilar('deepseek-flash 继续  [tools]') !== undefined, 'enabled semantic cache should match');
 });
+// ---------------------------------------------------------------------------
+// 11) 累计的 cacheReadTokens 必须取差分（否则单请求虚增约 26 万 hit token）
+// ---------------------------------------------------------------------------
+check('billing.cumulative-cache-read', () => {
+    const n = new billing_1.CacheReadNormalizer();
+    // 实测序列（会话 794b93ff：usage chunk 的原始值与宿主日志的累计列完全一致）
+    assert(n.normalize('s1', 262016) === 0, 'first sighting must not claim history it never saw');
+    assert(n.normalize('s1', 262400) === 384, 'delta 1');
+    assert(n.normalize('s1', 262912) === 512, 'delta 2');
+    assert(n.normalize('s1', 263296) === 384, 'delta 3');
+    // 数值回退说明累计序列换了（上下文重置 / 新 provider 会话），按新序列起算
+    assert(n.normalize('s1', 100) === 100, 'reset series falls back to the raw value');
+    // 会话之间互不影响
+    assert(n.normalize('s2', 999) === 0, 'per-session tracking');
+    // 记账侧：差分后的命中必须是「单请求」量级，而不是累计量级
+    const ledger = new billing_1.BillingLedger();
+    assert(n.normalize('s3', 5000) === 0, 'first sighting for s3');
+    const book = ledger.record({
+        model: 'deepseek-flash',
+        usage: { inputTokens: 100, cacheReadTokens: n.normalize('s3', 5400), outputTokens: 50 },
+        beforeChars: 2000,
+        afterChars: 1000,
+    });
+    assert(book.hitTokens === 400, `per-request hit must be 400, got ${book.hitTokens}`);
+    assert(book.missTokens === 100, `miss must stay 100, got ${book.missTokens}`);
+});
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {
     process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'} ${item.name} :: ${item.detail}\n`);

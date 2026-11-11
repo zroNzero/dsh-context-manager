@@ -20,7 +20,7 @@
  * （见 README「已知卡点 2」），所以只以 `unverifiedOutputTokens` 单独列示，不计入降幅。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BillingLedger = void 0;
+exports.BillingLedger = exports.CacheReadNormalizer = void 0;
 const pricing_js_1 = require("./pricing.js");
 const emptyBucket = () => ({
     requests: 0,
@@ -41,6 +41,41 @@ const addTo = (bucket, record) => {
     bucket.savedCost += record.savedCost;
 };
 const reductionOf = (actual, counterfactual) => counterfactual > 0 ? Math.max(0, 1 - actual / counterfactual) : 0;
+/**
+ * provider 的 `cacheReadTokens` 是**会话累计值**，不是单请求值。
+ *
+ * 实测证据（2026-11-11，会话 794b93ff 重启后的连续请求）：usage chunk 里的原始值是
+ * 262016 → 262400 → 262912 → 263296 → 264960，而宿主会话日志里同一批请求的
+ * `assistant/message.usage.cacheReadTokens` 恰好也是这几个值（累计列）。
+ * 也就是说上游给的就是累计数，直接当单请求命中会让每次请求虚增约 26 万 hit token。
+ *
+ * 用法：同一个 sessionId 顺序调用 normalize()，拿返回值当单请求命中。
+ * 若数值回退（换了 provider 会话/上下文重置），按新序列重新起算。
+ */
+class CacheReadNormalizer {
+    seen = new Map();
+    normalize(sessionId, raw) {
+        const value = Math.max(0, Math.trunc(raw || 0));
+        const prev = this.seen.get(sessionId);
+        if (prev === undefined) {
+            // 第一次见到这个会话：累计值里包含了我们没观测到的历史（典型是插件在会话中途
+            // 重启），无法把其中任何一段归属给当前请求，因此只记起点、这一次记 0 命中。
+            // 宁可少记一次（发生在几百次请求里的一次），也不能把 26 万 token 记到单次请求上。
+            this.seen.set(sessionId, value);
+            return 0;
+        }
+        const delta = value >= prev ? value - prev : value;
+        this.seen.set(sessionId, value);
+        return Math.max(0, delta);
+    }
+    reset(sessionId) {
+        if (sessionId === undefined)
+            this.seen.clear();
+        else
+            this.seen.delete(sessionId);
+    }
+}
+exports.CacheReadNormalizer = CacheReadNormalizer;
 class BillingLedger {
     records = [];
     noReduction = 0;
