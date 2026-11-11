@@ -747,6 +747,11 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
           hitTokens: record.hitTokens,
           outputTokens: record.outputTokens,
           removedPromptTokens: record.removedPromptTokens,
+          avoidedOutputTokens: record.avoidedOutputTokens,
+          effort: effort ?? null,
+          baselineEffort: baselineEffort ?? null,
+          /** 本次请求模型可见载荷的字符数：用来离线区分「新增内容」与「缓存浪费」。 */
+          payloadChars: afterChars,
           actualCost: Number(record.actualCost.toFixed(6)),
           savedCost: Number(record.savedCost.toFixed(6)),
         })
