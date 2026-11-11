@@ -155,6 +155,20 @@ export interface SchemaCompressorOptions {
     } | null;
 }
 /**
+ * 把载荷拆成 system / messages / tools 三段。
+ *
+ * 为什么要拆：`payloadChars` 是个总数，看不出「每次都重读、但跟对话无关」的那部分有多大。
+ * 2026-11-11 实测发现 messages 压到 ~492K 后 `payloadChars` 仍是 ~789K，
+ * 差额 ~297K 就在 system 与 tools 里——它们**每个请求都按缓存价重读一遍**，
+ * 而且跟对话长度无关，是纯固定开销。不拆开就永远看不见这块。
+ */
+export declare function payloadParts(request: any): {
+    system: number;
+    messages: number;
+    tools: number;
+    total: number;
+};
+/**
  * 包装 llm.stream / prepareCall：在请求发往适配器前压缩工具描述。
  * 失败安全：任何异常原样放行。
  */

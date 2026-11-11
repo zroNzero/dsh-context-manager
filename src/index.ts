@@ -173,6 +173,15 @@ const POLICY_TEXT = [
   // 输出纪律：提高信息密度，不降低能力。省的是客套与复述，不是结论。
   'Output discipline: lead with the result. No preamble, no restating the request, no closing pleasantries, no summary of what you just did if the diff or output already shows it.',
   'Prefer minimal diffs, JSON, or tables over prose; include only the lines that changed and never print a whole file unless asked. Reasoning effort is sized per task, so spend tokens on the work, not on narration.',
+  /**
+   * 往返纪律：这是唯一一条「不降智反而更快」的省钱规则。
+   *
+   * 实测：本会话 1,087 个带工具调用的 step 里 1,045 个（96.1%）只发 1 个调用。
+   * 每次 step 都要把整段前缀按缓存价重读一遍（≈¥0.0034），所以请求数本身就是账单，
+   * 而它跟回答质量毫无关系。把互相独立的调用放进同一条消息，是纯赚。
+   */
+  'Round-trip discipline: when several tool calls are independent (different files, different commands, different queries), issue them in ONE message instead of one per message. Every round trip re-reads the whole prefix, so batching is both faster and cheaper. Never batch calls that depend on each other\'s output.',
+  'Folded history uses [SPILL] receipts: when only the file name is given, it is under the spill directory stated above — read it if you need the original.',
 ].join(' ')
 
 interface Counters {
@@ -566,7 +575,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       name: 'cost-killer:policy',
       order: 46,
       text: config.prefixSpillEnabled
-        ? `${POLICY_TEXT} Folded history uses [SPILL] receipts: when only the file name is given, it is under ${path.resolve(config.spillDir)} — read it if you need the original.`
+        ? `${POLICY_TEXT} the directory is ${path.resolve(config.spillDir)}`
         : POLICY_TEXT,
     })
     if (typeof sectionDisposer === 'function') disposers.push(sectionDisposer)
@@ -809,33 +818,48 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
              * 之前只有 `removedPromptTokens` 一个汇总数，看不出剥 thinking 到底有没有生效
              * （`payloadChars` 一直停在 680K，而预测应到 172K），只能靠猜。
              * 现在把 role 直方图、块类型直方图、两边各省多少一起打出来。
+             *
+             * 2026-11-11 14:16Z 实测结果：fold 省 266,033 字符、strip 省 541,092 字符，
+             * 两者合计把 ~1.59M 压到 ~783K。所以两个杠杆都在工作，之前的「strip 失效」
+             * 是我用错误基数的算术误判。
+             *
+             * 现在再加 **按字符数的构成**：只剩体积才能看出还能砍哪一块。
+             * `sent` 是压缩后真正发出去的，`roleChars` / `blockChars` 都是它的分解。
              */
-            if (folded.stats.folded > 0 || next.length !== messages.length || staleReasoningAllowed) {
-              const roles: Record<string, number> = {}
-              const blocks: Record<string, number> = {}
-              for (const message of Array.isArray(messages) ? messages : []) {
-                const role = String(message?.role ?? '?')
-                roles[role] = (roles[role] ?? 0) + 1
-                if (Array.isArray(message?.content)) {
-                  for (const block of message.content) {
-                    const type = String(block?.type ?? '?')
-                    blocks[type] = (blocks[type] ?? 0) + 1
-                  }
-                } else if (typeof message?.content === 'string') {
-                  blocks['plain-string'] = (blocks['plain-string'] ?? 0) + 1
+            const roleChars: Record<string, number> = {}
+            const blockChars: Record<string, number> = {}
+            let sentChars = 0
+            for (const message of next) {
+              const role = String(message?.role ?? '?')
+              const content = message?.content
+              const size = typeof content === 'string' ? content.length : JSON.stringify(content ?? '').length
+              roleChars[role] = (roleChars[role] ?? 0) + size
+              sentChars += size
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  const type = String(block?.type ?? '?')
+                  const inner =
+                    typeof block?.text === 'string'
+                      ? block.text.length
+                      : JSON.stringify(block?.arguments ?? block ?? '').length
+                  blockChars[type] = (blockChars[type] ?? 0) + inner
                 }
+              } else if (typeof content === 'string') {
+                blockChars['plain-string'] = (blockChars['plain-string'] ?? 0) + content.length
               }
+            }
+            if (folded.stats.folded > 0 || stripStats || staleReasoningAllowed) {
               logEvent('debug', 'history.fold', {
                 module: 'PrefixSpill',
                 messages: Array.isArray(messages) ? messages.length : 0,
-                foldAllowed: config.prefixSpillEnabled,
                 foldCharsSaved: folded.stats.charsBefore - folded.stats.charsAfter,
                 folded: folded.stats.folded,
                 stripAllowed: staleReasoningAllowed,
                 stripCharsSaved: stripStats ? stripStats.charsSaved : 0,
                 stripped: stripStats ? stripStats.stripped : 0,
-                roles,
-                blocks,
+                sentChars,
+                roleChars,
+                blockChars,
               })
             }
             return finish(next)

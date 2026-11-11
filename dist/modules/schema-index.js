@@ -18,6 +18,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.compressToolSchemas = compressToolSchemas;
 exports.selectStableToolSet = selectStableToolSet;
+exports.payloadParts = payloadParts;
 exports.installSchemaCompressor = installSchemaCompressor;
 exports.schemaTokens = schemaTokens;
 const contracts_1 = require("../contracts");
@@ -138,8 +139,19 @@ function selectStableToolSet(tools, prompt, options = {}) {
 }
 /** 模型可见载荷的字符数（system + messages + tools），用于真实账本的字符比校准。 */
 function payloadChars(request) {
+    return payloadParts(request).total;
+}
+/**
+ * 把载荷拆成 system / messages / tools 三段。
+ *
+ * 为什么要拆：`payloadChars` 是个总数，看不出「每次都重读、但跟对话无关」的那部分有多大。
+ * 2026-11-11 实测发现 messages 压到 ~492K 后 `payloadChars` 仍是 ~789K，
+ * 差额 ~297K 就在 system 与 tools 里——它们**每个请求都按缓存价重读一遍**，
+ * 而且跟对话长度无关，是纯固定开销。不拆开就永远看不见这块。
+ */
+function payloadParts(request) {
     if (!request)
-        return 0;
+        return { system: 0, messages: 0, tools: 0, total: 0 };
     const system = typeof request.system === 'string' ? request.system.length : 0;
     let messages = 0;
     let tools = 0;
@@ -155,7 +167,7 @@ function payloadChars(request) {
     catch {
         tools = 0;
     }
-    return system + messages + tools;
+    return { system, messages, tools, total: system + messages + tools };
 }
 /** 粗略估算消息侧 token（4 字符/token），用于面板比例的分母。 */
 function estimateMessagesTokens(messages) {
@@ -623,7 +635,8 @@ function installSchemaCompressor(ctx, options = {}) {
          * 手搓调用，也不受我们那次 prepared 的冻结配置约束。
          */
         const kaInvoke = (body) => originalStream.call(llm, { ...body, maxTokens: 1 });
-        const beforeChars = payloadChars(request);
+        const beforeParts = payloadParts(request);
+        const beforeChars = beforeParts.total;
         const transformed = transform(request);
         // 动态 reasoning effort：prepared 路径必须在 prepareCall 前修正（见 prepareCallConfig），
         // 这里只对 direct stream 生效；否则会触发 INVALID_PREPARED_CALL。
@@ -632,7 +645,19 @@ function installSchemaCompressor(ctx, options = {}) {
         if (!prepared && effort && effort.effort && effort.effort !== transformed?.reasoningEffort) {
             optimized = { ...transformed, reasoningEffort: effort.effort };
         }
-        const afterChars = payloadChars(optimized);
+        const afterParts = payloadParts(optimized);
+        const afterChars = afterParts.total;
+        /**
+         * 起点日志：把 system / messages / tools 三段分开记。
+         * 这是唯一能回答「还剩多少可压」的证据——2026-11-11 就是靠它发现
+         * messages 压到 492K 后总量仍是 789K，差额 297K 全在 system + tools 里。
+         */
+        (0, log_1.logEvent)('debug', 'payload.parts', {
+            module: 'SchemaIndex',
+            sessionId: request?.sessionId ?? 'unknown',
+            before: beforeParts,
+            after: afterParts,
+        });
         const cache = options.responseCache;
         if (!cache)
             return invokeMeasured(invoke, optimized, beforeChars, afterChars, kaInvoke);
