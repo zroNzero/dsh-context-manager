@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.0 — 2026-11-11
+
+### A 杠杆：上下文防火墙（Pointer-First） + B 杠杆：寿命摊销
+
+- **上下文防火墙**：工具输出超过 `firewallTokens`（默认 250）时，非结构化压缩一律
+  替换为「结构化摘要（头/尾/错误行）+ 落盘指针」，强制 `extractionMode != none`。
+- **阈值下放**：`extractionTokens 500`、`admissionTokens 800`，让 1–2k 输出真正进入压缩。
+- **CacheAnchor 寿命摊销**：`netBenefit = savedByCompression × (1 + 剩余回合) − 冷读代价`；
+  `assumedTurns` 默认 40，剩余回合 = `assumedTurns − turn`。折叠不再“见破前缀就拦”。
+- 日志新增 `remainingTurns` / `lifetimeCompression`；实测轨迹：
+  `prefixBreak=true, savedTokens=2458, remainingTurns=1998, netBenefit=4825382 → approved`。
+- 测试：`self-test 9/9`、`verify 16/16`（新增 `extraction.firewall-summary`、
+  `firewall summarizes >250 token outputs`、`amortized fold accepted under prefix break`）。
+
 ## v1.0.13 — 2026-11-11
 
 ### 分账修正：extraction / admission 不再混记

@@ -15,6 +15,7 @@ exports.extractConstraints = extractConstraints;
 exports.looksLikeCode = looksLikeCode;
 exports.isBalancedCode = isBalancedCode;
 exports.skeletonize = skeletonize;
+exports.buildFirewallSummary = buildFirewallSummary;
 exports.runExtraction = runExtraction;
 const contracts_1 = require("../contracts");
 const log_1 = require("../log");
@@ -428,6 +429,32 @@ function headTail(text, headChars, tailChars) {
     if (points.length <= headChars + tailChars)
         return text;
     return `${points.slice(0, headChars).join('')}\n\n[... 中间内容已省略 ...]\n\n${points.slice(-tailChars).join('')}`;
+}
+/**
+ * 上下文防火墙：超过阈值（默认 250 tokens）的工具输出在进入上下文前，
+ * 一律压成「结构化摘要 + 指针」，完整内容由 Admission 落盘后可 read 回读。
+ * 这是 v1.1 降低综合成本的主杠杆，不依赖历史折叠，也不会击穿前缀缓存。
+ */
+function buildFirewallSummary(text, maxTokens) {
+    const budgetChars = Math.max(200, Math.floor(maxTokens * 4));
+    const lines = text.split(/\r?\n/);
+    const totalLines = lines.length;
+    const head = lines.slice(0, 12);
+    const tail = lines.slice(-8);
+    const signals = unique(lines
+        .filter((line) => /\b(error|exception|failed|denied|not found|exit code|timeout|fatal)\b/i.test(line))
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0), 8);
+    const note = `[FIREWALL] 原始 ${totalLines} 行 / ~${(0, contracts_1.estimateTokens)(text)} tokens 已摘要；` +
+        '完整内容已由 Admission 落盘，需要细节请用 read 读取 [ADMISSION] 指针。';
+    const body = [...head];
+    if (signals.length > 0)
+        body.push('--- errors ---', ...signals);
+    body.push('--- tail ---', ...tail);
+    let summary = `${note}\n${body.join('\n')}`;
+    if (summary.length > budgetChars)
+        summary = `${summary.slice(0, budgetChars)}\n[FIREWALL truncated]`;
+    return { text: summary, tokens: (0, contracts_1.estimateTokens)(summary), tokensBefore: (0, contracts_1.estimateTokens)(text) };
 }
 function runExtraction(input) {
     const startedAt = Date.now();

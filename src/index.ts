@@ -26,7 +26,7 @@ import {
 import { gatePatch } from './cacheAnchor'
 import { logEvent } from './log'
 import { runAdmission } from './modules/admission'
-import { runExtraction } from './modules/extraction'
+import { runExtraction, buildFirewallSummary } from './modules/extraction'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { hasCrossFileDependency, RoutingModule } from './modules/routing'
 import { collectGarbage } from './modules/spill-gc'
@@ -51,9 +51,13 @@ export const Config = z.object({
   /** 落盘目录（相对进程工作目录）。 */
   spillDir: z.string().default('./spill'),
   /** 单条工具输出超过该 token 数即准入落盘。 */
-  admissionTokens: z.number().int().positive().default(1500),
+  admissionTokens: z.number().int().positive().default(800),
   /** 单条工具输出经萃取后的目标 token 上限。 */
-  extractionTokens: z.number().int().positive().default(800),
+  extractionTokens: z.number().int().positive().default(500),
+  /** 上下文防火墙阈值：超过该 token 数的工具输出一律摘要化 + 落盘。 */
+  firewallTokens: z.number().int().positive().default(250),
+  /** 会话总回合数预估，用于 CacheAnchor 的寿命摊销（默认 40：约 2× 冷读回本线）。 */
+  assumedTurns: z.number().int().positive().default(40),
   /** 是否真正发起本地路由请求（决策与日志始终开启）。 */
   localRouting: z.boolean().default(false),
   /** spill 目录保留的最大文件数。 */
@@ -492,6 +496,37 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         logEvent('warn', '[Breaker] skip compression', { module: 'Breaker', state: breaker.state, tool: exec?.tool?.name ?? 'unknown' })
       }
 
+      // 上下文防火墙（v1.1 主杠杆）：超过 firewallTokens 的输出，若没有拿到
+      // 结构化压缩（ast/json/index），一律改用「结构化摘要 + 落盘指针」。
+      const weakExtraction =
+        !extracted ||
+        !extracted.safe ||
+        extracted.mode === 'none' ||
+        extracted.mode === 'head-tail' ||
+        extracted.mode === 'section'
+      if (weakExtraction && tokensBefore > config.firewallTokens) {
+        const firewall = buildFirewallSummary(text, config.firewallTokens)
+        const currentTokens = extracted && extracted.safe && extracted.mode !== 'none' ? extracted.tokensAfter : tokensBefore
+        if (firewall.text.length > 0 && firewall.text.length < text.length && firewall.tokens < currentTokens) {
+          extracted = {
+            text: firewall.text,
+            constraints: '',
+            safe: true,
+            mode: 'firewall',
+            tokensBefore: firewall.tokensBefore,
+            tokensAfter: firewall.tokens,
+            tokensSaved: Math.max(0, firewall.tokensBefore - firewall.tokens),
+            reason: 'firewall',
+          }
+          logEvent('info', 'firewall.summarized', {
+            module: 'Firewall',
+            tokensBefore: firewall.tokensBefore,
+            tokensAfter: firewall.tokens,
+            saved: extracted.tokensSaved,
+          })
+        }
+      }
+
       const compressed = extracted && extracted.safe && extracted.mode !== 'none' ? extracted.text : text
       if (extracted && extracted.mode !== 'none' && extracted.safe) counters.extracted += 1
 
@@ -683,12 +718,16 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         cachedPrefixTokens,
       })
 
+      // 寿命摊销：按“会话总回合预估 − 当前回合”估算剩余回合，供 CacheAnchor 折算。
+      const remainingTurns = Math.max(0, Math.floor(config.assumedTurns - Number(payload?.turn ?? 0)))
       const decision = gatePatch({
         prefixBreak,
         cachedPrefixTokens,
         savedByCompression: plan.tokensSaved,
         savedBySchema: 0,
         recallPenalty: 0,
+        expectedRemainingTurns: remainingTurns,
+        contextTokens: tokens,
         patch: plan.patch,
       })
 
@@ -702,6 +741,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         coldReadPenalty: decision.coldReadPenalty,
         patchId: decision.patchId,
         savedTokens: plan.tokensSaved,
+        remainingTurns,
       })
 
       if (!decision.approved) {

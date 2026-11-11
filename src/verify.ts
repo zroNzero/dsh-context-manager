@@ -221,6 +221,23 @@ async function main(): Promise<void> {
     dispose3()
   })
 
+  await check('firewall summarizes >250 token outputs', async () => {
+    const post = hooks.get('tools/post-execute')
+    const session = new FakeSession()
+    session.id = 'verify-firewall'
+    session.add('user/message', { role: 'user', content: [{ type: 'text', text: '测试防火墙' }] })
+    const payload = `${Array.from({ length: 300 }, (_, index) => `line ${index}: ${'y'.repeat(40)}`).join('\n')}\nError: ENOENT`
+    const decision = await post(
+      { tool: { name: 'pwsh' }, agent: { session } },
+      { content: [{ type: 'text', text: payload }] },
+      async () => ({ kind: 'accept', content: [{ type: 'text', text: payload }] }),
+    )
+    const output = String(decision?.content?.[0]?.text ?? '')
+    assert(output.includes('[FIREWALL]'), 'firewall summary missing')
+    assert(output.includes('[ADMISSION]'), 'spill pointer missing')
+    assert(output.length < payload.length, 'firewall output must be shorter')
+  })
+
   await check('tool output compressed with recoverable pointer', async () => {
     const post = hooks.get('tools/post-execute')
     const payload = bigCode(160)
@@ -373,6 +390,42 @@ async function main(): Promise<void> {
       async () => ({ kind: 'accept', content: [{ type: 'text', text: 'x'.repeat(2000) }] }),
     )
     assert(decision?.kind === 'accept', 'post-execute must not throw with opaque agent')
+  })
+
+  await check('amortized fold accepted under prefix break', async () => {
+    const hooks4 = new Map<string, any>()
+    const ctx4: any = {
+      systemPrompt: { section: () => () => {} },
+      tools: { register: () => () => {} },
+      on: (event: string, fn: any) => {
+        hooks4.set(event, fn)
+        return () => {}
+      },
+    }
+    const dispose4 = apply(ctx4, { maxInputTokens: 2000, foldAtRatio: 0.2, retainRecent: 2, minSaveTokens: 50, assumedTurns: 2000 })
+    const session = new FakeSession()
+    session.id = 'verify-amortized'
+    session.add('user/message', { role: 'user', content: [{ type: 'text', text: '需求：长会话折叠' }] })
+    for (let index = 0; index < 6; index += 1) {
+      session.add('assistant/message', { role: 'assistant', content: [{ type: 'text', text: `阶段 ${index} ${'a'.repeat(2000)}` }] })
+    }
+    const pre = hooks4.get('agent/pre-step')
+    await pre({ agent: { session, model: 'm' }, turn: 1, step: 1, messages: [] }, async () => ({ kind: 'enter', messages: [] }))
+    for (let index = 0; index < 4; index += 1) {
+      session.add('assistant/message', { role: 'assistant', content: [{ type: 'text', text: `后续 ${index} ${'b'.repeat(2000)}` }] })
+    }
+    session.add('assistant/message', { role: 'assistant', content: [{ type: 'text', text: '结论' }] })
+    await pre({ agent: { session, model: 'm' }, turn: 2, step: 1, messages: [] }, async () => ({ kind: 'enter', messages: [] }))
+
+    const decisions = fs
+      .readFileSync('debug.log', 'utf8')
+      .split('\n')
+      .filter((line) => line.includes('"cache.decision"') && line.includes('verify-amortized'))
+      .map((line) => JSON.parse(line))
+    const last = decisions[decisions.length - 1]
+    assert(last && last.prefixBreak === true && last.approved === true, `amortized fold not approved: ${JSON.stringify(last)}`)
+    assert(Number(last.remainingTurns) > 0, 'remainingTurns missing in decision log')
+    dispose4()
   })
 
   await check('no console.log in sources', () => {

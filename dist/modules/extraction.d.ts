@@ -9,7 +9,7 @@
  * 3. 抽取后任一约束值丢失 → 返回原文本。
  * 返回 safe=false 时，调用方（index.ts）必须使用 admitted.text（原文/收据），不得使用本模块输出。
  */
-export type ExtractionMode = 'none' | 'ast' | 'json' | 'section' | 'index' | 'head-tail';
+export type ExtractionMode = 'none' | 'ast' | 'json' | 'section' | 'index' | 'head-tail' | 'firewall';
 export interface ExtractionResult {
     text: string;
     constraints: string;
@@ -34,6 +34,16 @@ export declare function isBalancedCode(text: string): boolean;
  * 返回 null 表示「不可解析」——调用方必须 Fail-Closed 使用原文本。
  */
 export declare function skeletonize(text: string): string | null;
+/**
+ * 上下文防火墙：超过阈值（默认 250 tokens）的工具输出在进入上下文前，
+ * 一律压成「结构化摘要 + 指针」，完整内容由 Admission 落盘后可 read 回读。
+ * 这是 v1.1 降低综合成本的主杠杆，不依赖历史折叠，也不会击穿前缀缓存。
+ */
+export declare function buildFirewallSummary(text: string, maxTokens: number): {
+    text: string;
+    tokens: number;
+    tokensBefore: number;
+};
 export declare function runExtraction(input: {
     text: string;
     maxTokens: number;

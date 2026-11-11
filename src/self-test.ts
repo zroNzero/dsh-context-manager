@@ -8,7 +8,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { runCacheAnchorSelfTest } from './cacheAnchor'
-import { runExtraction } from './modules/extraction'
+import { runExtraction, buildFirewallSummary } from './modules/extraction'
+import { estimateTokens } from './contracts'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
 import { SavingsLedger } from './modules/savings-ledger'
@@ -114,6 +115,19 @@ check('extraction.fail-closed-unparseable', () => {
 // ---------------------------------------------------------------------------
 // 4) Memory 折叠安全边界（2026-11-10 事故回归测试）
 // ---------------------------------------------------------------------------
+
+check('extraction.firewall-summary', () => {
+  const lines = Array.from({ length: 300 }, (_, index) => `line ${index}: ${'x'.repeat(40)}`)
+  lines.push('Error: ENOENT at src\\firewall.ts')
+  const text = lines.join('\n')
+  const before = estimateTokens(text)
+  const summary = buildFirewallSummary(text, 250)
+  assert(summary.tokensBefore === before, 'firewall tokensBefore mismatch')
+  assert(summary.tokens < before, `firewall must shrink tokens (${before} -> ${summary.tokens})`)
+  assert(summary.tokens <= 270, `firewall summary too big: ${summary.tokens}`)
+  assert(summary.text.includes('[FIREWALL]'), 'firewall marker missing')
+  assert(summary.text.includes('Error: ENOENT'), 'error line must be preserved')
+})
 
 check('memory.fold-excludes-toolcall', () => {
   const entries: MemoryEntry[] = []

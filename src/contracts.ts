@@ -37,6 +37,10 @@ export interface CacheAnchorInput {
   savedByCompression: number
   savedBySchema: number
   recallPenalty: number
+  /** 预计剩余回合数；用于把「每回合节省」摊销成寿命收益。 */
+  expectedRemainingTurns?: number
+  /** 当前上下文 token 数，用于大块折叠（chunking）判定。 */
+  contextTokens?: number
   patch: Patch
 }
 

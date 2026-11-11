@@ -22,11 +22,18 @@ exports.CACHE_ECON = {
     defaultRecallPenaltyPerToken: 1.2,
 };
 function evaluateCacheAnchor(input) {
+    const remainingTurns = Math.max(0, Math.floor(input.expectedRemainingTurns ?? 0));
     const coldReadPenalty = input.prefixBreak
         ? input.cachedPrefixTokens * (exports.CACHE_ECON.missPrice - exports.CACHE_ECON.hitPrice)
         : 0;
-    const netBenefit = input.savedByCompression + input.savedBySchema - coldReadPenalty - input.recallPenalty;
-    const approved = netBenefit > 0 && (!input.prefixBreak || input.savedByCompression >= coldReadPenalty);
+    // 寿命摊销：一次折叠会在后续每个回合持续省 token，按「剩余回合」累计。
+    const lifetimeCompression = input.savedByCompression * (1 + remainingTurns);
+    const netBenefit = lifetimeCompression + input.savedBySchema - coldReadPenalty - input.recallPenalty;
+    // 大块折叠（≥30% 上下文）仅用于日志观测：netBenefit 已经覆盖冷读成本。
+    const chunked = input.contextTokens !== undefined && input.contextTokens > 0
+        ? input.savedByCompression >= input.contextTokens * 0.3
+        : false;
+    const approved = netBenefit > 0;
     return {
         approved,
         reason: approved ? 'NET_POSITIVE' : input.prefixBreak ? 'PREFIX_BREAK_OUTWEIGHED' : 'NON_POSITIVE',
@@ -52,6 +59,8 @@ function gatePatch(input) {
         savedByCompression: input.savedByCompression,
         savedBySchema: input.savedBySchema,
         recallPenalty: input.recallPenalty,
+        expectedRemainingTurns: Math.max(0, Math.floor(input.expectedRemainingTurns ?? 0)),
+        lifetimeCompression: input.savedByCompression * (1 + Math.max(0, Math.floor(input.expectedRemainingTurns ?? 0))),
     });
     return decision;
 }
@@ -153,5 +162,16 @@ function runCacheAnchorSelfTest() {
         patch: makePatch(40000),
     });
     check('case-5 prefix-break-accepted', accepted.approved && accepted.reason === 'NET_POSITIVE' && accepted.coldReadPenalty === 29000 && accepted.netBenefit === 11000, `approved=${accepted.approved} reason=${accepted.reason} cold=${accepted.coldReadPenalty} net=${accepted.netBenefit}`);
+    // 6) 寿命摊销：单次节省不足以覆盖冷读，但按剩余 600 回合累计后可覆盖。
+    const amortized = gatePatch({
+        prefixBreak: true,
+        cachedPrefixTokens: 10000,
+        savedByCompression: 500,
+        savedBySchema: 0,
+        recallPenalty: 0,
+        expectedRemainingTurns: 600,
+        patch: makePatch(500),
+    });
+    check('case-6 amortized-lifetime', amortized.approved && amortized.netBenefit === 10500, `approved=${amortized.approved} reason=${amortized.reason} net=${amortized.netBenefit} (500*601-290000)`);
     return { passed, failed, lines };
 }

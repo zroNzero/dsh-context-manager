@@ -110,8 +110,10 @@ dsh install D:\path\to\dsh-context-manager
         maxInputTokens: 100000
         foldAtRatio: 0.6
         retainRecent: 8
-        admissionTokens: 4000
-        extractionTokens: 2500
+        admissionTokens: 800
+        extractionTokens: 500
+        firewallTokens: 250
+        assumedTurns: 40
         compressionBudgetMs: 50
         localRouting: false
         spillMaxFiles: 50
@@ -123,7 +125,7 @@ dsh install D:\path\to\dsh-context-manager
 ```powershell
 npm run build     # tsc
 npm run test      # CacheAnchor 公式 / AST / Fail-Closed
-npm run verify    # 9 项宿主形态验收断言
+npm run verify    # 16 项宿主形态验收断言
 npm run demo      # 端到端压缩、缓存门控、路由、GC、去重
 ```
 

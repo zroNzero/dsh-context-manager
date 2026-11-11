@@ -23,6 +23,8 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
     spillDir: z.ZodDefault<z.ZodString>;
     admissionTokens: z.ZodDefault<z.ZodNumber>;
     extractionTokens: z.ZodDefault<z.ZodNumber>;
+    firewallTokens: z.ZodDefault<z.ZodNumber>;
+    assumedTurns: z.ZodDefault<z.ZodNumber>;
     localRouting: z.ZodDefault<z.ZodBoolean>;
     spillMaxFiles: z.ZodDefault<z.ZodNumber>;
     spillTtlHours: z.ZodDefault<z.ZodNumber>;

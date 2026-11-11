@@ -13,6 +13,7 @@ const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const cacheAnchor_1 = require("./cacheAnchor");
 const extraction_1 = require("./modules/extraction");
+const contracts_1 = require("./contracts");
 const memory_1 = require("./modules/memory");
 const host_sim_1 = require("./host-sim");
 const savings_ledger_1 = require("./modules/savings-ledger");
@@ -101,6 +102,18 @@ check('extraction.fail-closed-unparseable', () => {
 // ---------------------------------------------------------------------------
 // 4) Memory 折叠安全边界（2026-11-10 事故回归测试）
 // ---------------------------------------------------------------------------
+check('extraction.firewall-summary', () => {
+    const lines = Array.from({ length: 300 }, (_, index) => `line ${index}: ${'x'.repeat(40)}`);
+    lines.push('Error: ENOENT at src\\firewall.ts');
+    const text = lines.join('\n');
+    const before = (0, contracts_1.estimateTokens)(text);
+    const summary = (0, extraction_1.buildFirewallSummary)(text, 250);
+    assert(summary.tokensBefore === before, 'firewall tokensBefore mismatch');
+    assert(summary.tokens < before, `firewall must shrink tokens (${before} -> ${summary.tokens})`);
+    assert(summary.tokens <= 270, `firewall summary too big: ${summary.tokens}`);
+    assert(summary.text.includes('[FIREWALL]'), 'firewall marker missing');
+    assert(summary.text.includes('Error: ENOENT'), 'error line must be preserved');
+});
 check('memory.fold-excludes-toolcall', () => {
     const entries = [];
     for (let index = 0; index < 6; index += 1) {
