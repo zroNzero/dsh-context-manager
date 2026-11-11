@@ -19,7 +19,7 @@ import { rewriteMessages } from './modules/history-rewriter'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
 import { SavingsLedger } from './modules/savings-ledger'
-import { BillingLedger, CacheReadNormalizer } from './modules/billing'
+import { BillingLedger } from './modules/billing'
 import { classifyTurn, decideEffort } from './modules/effort-policy'
 import { workspaceRef, workspaceRefFromSession } from './modules/workspace'
 import { logEvent } from './log'
@@ -463,31 +463,24 @@ check('cache.semantic-replay-off-by-default', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 11) 累计的 cacheReadTokens 必须取差分（否则单请求虚增约 26 万 hit token）
+// 11) cacheReadTokens 是「单请求」命中量：不得做差分
 // ---------------------------------------------------------------------------
 
-check('billing.cumulative-cache-read', () => {
-  const n = new CacheReadNormalizer()
-  // 实测序列（会话 794b93ff：usage chunk 的原始值与宿主日志的累计列完全一致）
-  assert(n.normalize('s1', 262016) === 0, 'first sighting must not claim history it never saw')
-  assert(n.normalize('s1', 262400) === 384, 'delta 1')
-  assert(n.normalize('s1', 262912) === 512, 'delta 2')
-  assert(n.normalize('s1', 263296) === 384, 'delta 3')
-  // 数值回退说明累计序列换了（上下文重置 / 新 provider 会话），按新序列起算
-  assert(n.normalize('s1', 100) === 100, 'reset series falls back to the raw value')
-  // 会话之间互不影响
-  assert(n.normalize('s2', 999) === 0, 'per-session tracking')
-
-  // 记账侧：差分后的命中必须是「单请求」量级，而不是累计量级
+check('billing.cache-read-is-per-request', () => {
+  /**
+   * 实测序列（会话 794b93ff）：命中量随上下文增长而单调上升，但一次缓存口径重置让
+   * 它从 122,624 掉到 89,216 —— **累计值不可能下降**，所以它是单请求值。
+   * 早期误按累计值做差分（并且把「重置」当成整段差值），命中被低记 16 倍：
+   * 账本 342,912 vs 宿主真值 5,408,384，命中率显示 72% 而真值 98.3%。
+   */
   const ledger = new BillingLedger()
-  assert(n.normalize('s3', 5000) === 0, 'first sighting for s3')
   const book = ledger.record({
     model: 'deepseek-flash',
-    usage: { inputTokens: 100, cacheReadTokens: n.normalize('s3', 5400), outputTokens: 50 },
+    usage: { inputTokens: 100, cacheReadTokens: 5400, outputTokens: 50 },
     beforeChars: 2000,
     afterChars: 1000,
   })!
-  assert(book.hitTokens === 400, `per-request hit must be 400, got ${book.hitTokens}`)
+  assert(book.hitTokens === 5400, `hit must be the raw per-request value, got ${book.hitTokens}`)
   assert(book.missTokens === 100, `miss must stay 100, got ${book.missTokens}`)
 })
 

@@ -17,7 +17,6 @@
 
 import { estimateTokens } from '../contracts'
 import { logEvent } from '../log'
-import { CacheReadNormalizer } from './billing.js'
 import type { RewriteResult } from './history-rewriter'
 import { replayChunks, type ResponseCache } from './response-cache'
 import { selectTools, selectToolsScout, selectionFromNames, withCatalog, SEARCH_TOOLS_DEF, firstSentence, type ToolLike, type ToolSelection } from './tool-attention'
@@ -541,7 +540,10 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   const keepaliveFailures = new Map<string, number>()
   // provider �?cacheReadTokens 是会话累计值（已用宿主日志交叉验证：usage chunk 的原始值
   // 与日志里的累计列完全一致），所有记�?阈值都必须用差分。
-  const cacheRead = new CacheReadNormalizer()
+  /**
+   * 作废：上面那段「cacheReadTokens 是会话累计值」的旧注释是错的，不要照着改。
+   * 命中量本来就是**单请求**值，三条证据见 observeUsage 里的说明。
+   */
   const maxKeepaliveSessions = Math.max(1, Math.trunc(keepaliveCfg?.maxSessions ?? 3))
   let disposed = false
 
@@ -603,7 +605,7 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
       let fresh = 0
       for await (const chunk of stream) {
         if (chunk?.type !== 'usage' || !chunk.usage) continue
-        cached = cacheRead.normalize(String(optimized?.sessionId ?? 'default'), chunk.usage.cacheReadTokens ?? 0)
+        cached = Math.max(0, Number(chunk.usage.cacheReadTokens ?? 0))
         fresh = Math.max(0, chunk.usage.inputTokens ?? 0)
         promptTokens = cached + fresh
         // 保活本身就是真实支出，必须进账本（压缩前后字符相同 -> 零削减，只计成本）。
@@ -663,7 +665,21 @@ export function installSchemaCompressor(ctx: any, options: SchemaCompressorOptio
   ): void => {
     if (chunk?.type !== 'usage' || !chunk.usage) return
     const isKeepalive = optimized?.purpose === 'cache-keepalive'
-    const hitDelta = cacheRead.normalize(String(optimized?.sessionId ?? 'default'), chunk.usage.cacheReadTokens ?? 0)
+    /**
+     * `cacheReadTokens` 就是**本次请求**的命中量，不要再做差分。
+     *
+     * 2026-11-11 实测裁决（三条独立证据）：
+     *   1. 宿主会话日志 `assistant/message.data.usage`：49 次调用命中合计 5,408,384，
+     *      单次约 110K，等于当时上下文规模；
+     *   2. 账户计量 `.dshw-usage.json` 同期花费 ¥0.2835，与「按单次命中算」的 ¥0.299
+     *      只差 6%，按累计差分算会低 30%；
+     *   3. 序列里出现过 122,624 → 89,216 的**下降**，累计值不可能下降。
+     *
+     * 之前误判为累计值并做差分，结果每一次「缓存口径重置」都会把整个命中量当成差量
+     * （`value >= prev ? value - prev : value`），于是命中被低记 16 倍
+     * （342,912 实际 5,408,384），miss 被高记 43%，命中率显示 72% 而真值 98.3%。
+     */
+    const hitDelta = Math.max(0, Number(chunk.usage.cacheReadTokens ?? 0))
     if (!isKeepalive && keepaliveCfg?.enabled) {
       // 真实请求发出去了：它自己会刷新缓存，先撤掉这个会话挂起的保活。
       const key = String(optimized?.sessionId ?? 'default')

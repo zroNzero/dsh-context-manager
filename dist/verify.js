@@ -188,11 +188,12 @@ async function main() {
     });
     await check('billing captures provider usage from the live stream', async () => {
         const seen = [];
-        let cumulativeHit = 0;
+        let hit = 0;
         const llm = {
             stream(_request) {
-                cumulativeHit += 800;
-                const snapshot = cumulativeHit;
+                // 命中量是**单请求**值（不是累计值），每次给一个独立的值，直接把原始值记账。
+                hit = hit === 0 ? 800 : 1600;
+                const snapshot = hit;
                 return (async function* () {
                     yield { type: 'text-delta', index: 0, text: 'ok' };
                     yield { type: 'usage', usage: { inputTokens: 1200, cacheReadTokens: snapshot, outputTokens: 340 } };
@@ -232,15 +233,15 @@ async function main() {
             dispose();
         }
         assert(seen.length === 2, `usage callback fired ${seen.length} times`);
-        assert(seen[0].usage.cacheReadTokens === 0, 'first sighting must book zero hits (no observable baseline)');
-        assert(seen[1].usage.cacheReadTokens === 800, `per-request hit must be the delta, got ${seen[1].usage.cacheReadTokens}`);
+        assert(seen[0].usage.cacheReadTokens === 800, `per-request hit must pass through raw, got ${seen[0].usage.cacheReadTokens}`);
+        assert(seen[1].usage.cacheReadTokens === 1600, `per-request hit must pass through raw, got ${seen[1].usage.cacheReadTokens}`);
         assert(seen[1].usage.inputTokens === 1200 && seen[1].usage.outputTokens === 340, 'usage passthrough broken');
         assert(seen[1].purpose === 'agent-loop', `purpose lost: ${seen[1].purpose}`);
         assert(seen[1].beforeChars > seen[1].afterChars, `payload chars not reduced: ${seen[1].beforeChars}->${seen[1].afterChars}`);
         const ledger = new billing_1.BillingLedger();
         const record = ledger.record(seen[1]);
         assert(record !== null, 'billing refused a real usage record');
-        assert(record.hitTokens === 800, `ledger must book 800 hit tokens, got ${record.hitTokens}`);
+        assert(record.hitTokens === 1600, `ledger must book 1600 hit tokens, got ${record.hitTokens}`);
         assert(record.actualCost > 0, 'real cost must be positive');
         assert(record.removedPromptTokens > 0, 'measured removal must be positive after schema compression');
         assert(ledger.snapshot().reduction > 0, 'reduction must be positive');
