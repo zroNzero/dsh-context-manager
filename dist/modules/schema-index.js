@@ -332,7 +332,12 @@ function installSchemaCompressor(ctx, options = {}) {
                     changed: previousSeal !== undefined,
                 });
             }
-            const messagesTokens = estimateMessagesTokens(messages);
+            /**
+             * 必须按 JSON 全长估：旧实现只累加 `block.text`，把 tool-call 的 arguments 整个漏掉，
+             * 于是压缩后报 38,361 token 而真实载荷是 679,139 字符（≈146K token）——
+             * 日志里「省了 88%」全是假的，实际省的是 26%。这类自欺的计量比不计量更糟。
+             */
+            const messagesTokens = (0, contracts_1.estimateTokens)(JSON.stringify(messages ?? []));
             if (!Array.isArray(request.tools) || request.tools.length === 0) {
                 options.onRequest?.({
                     sessionId: String(request.sessionId ?? ''),
