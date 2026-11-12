@@ -790,6 +790,26 @@ function apply(ctx, rawConfig = {}) {
          * 都成功时，才允许后续请求丢弃老 thinking。两条都是极短请求（maxTokens 8）。
          * 失败一律按不允许处理 —— 省钱的收益远小于一次 `content[].thinking` 报错的代价。
          */
+        /**
+         * 先吃落盘裁决：探针是异步的，如果每个进程都重新探，启动后最初几秒发出的
+         * 请求会带着「未剥离」的历史，与之后「已剥离」的历史字节不同 ——
+         * 那几条请求白付一次全量前缀，剥离一生效前缀又当场作废，再冷读一次。
+         * 实测每次重启因此多付 miss 54,949（≈¥0.055），命中率被压到 98%。
+         */
+        const probeFile = path.resolve(config.spillDir, '.reasoning-probe.json');
+        const probeKey = (0, reasoning_drop_1.probeCacheKey)('deepseek-account', 'deepseek-flash');
+        if (config.dropStaleReasoning === 'auto' && !staleReasoningProbed) {
+            const cached = (0, reasoning_drop_1.readProbeCache)(probeFile, probeKey);
+            if (cached) {
+                staleReasoningProbed = true;
+                staleReasoningAllowed = cached.verdict === 'allowed';
+                (0, log_1.logEvent)('info', 'reasoning.probe_cached', {
+                    module: 'ReasoningDrop',
+                    verdict: cached.verdict,
+                    at: cached.at,
+                });
+            }
+        }
         if (config.dropStaleReasoning === 'auto' && !staleReasoningProbed && process.env.CK_DISABLE_REASONING_PROBE !== '1') {
             staleReasoningProbed = true;
             void (0, reasoning_drop_1.probeStaleReasoning)((request) => rawStream(request), {
@@ -798,6 +818,16 @@ function apply(ctx, rawConfig = {}) {
             })
                 .then((result) => {
                 staleReasoningAllowed = result.verdict === 'allowed';
+                // 只有明确的 allowed/denied 才缓存；inconclusive 不缓存，下次重启重探。
+                if (result.verdict !== 'inconclusive') {
+                    (0, reasoning_drop_1.writeProbeCache)(probeFile, {
+                        key: probeKey,
+                        verdict: result.verdict,
+                        control: result.control,
+                        stripped: result.stripped,
+                        at: new Date().toISOString(),
+                    });
+                }
                 (0, log_1.logEvent)('info', 'reasoning.probe', {
                     module: 'ReasoningDrop',
                     verdict: result.verdict,

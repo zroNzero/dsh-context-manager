@@ -19,7 +19,7 @@ import { estimateTokens } from './contracts'
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
 import { evictOldEpisodes, assertToolPairing } from './modules/episode-evict'
-import { stripStaleReasoning } from './modules/reasoning-drop'
+import { probeCacheKey, readProbeCache, stripStaleReasoning, writeProbeCache } from './modules/reasoning-drop'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
 import { SavingsLedger } from './modules/savings-ledger'
@@ -835,6 +835,28 @@ check('prefix.tool-pairing-validator', () => {
   assert(!assertToolPairing(reversed), 'result before call must fail')
 })
 
+// 27) 探针结论必须能跨进程复用：否则重启后第一轮不剥离 → 第二轮剥离 → 两次冷读
+// ---------------------------------------------------------------------------
+
+check('reasoning.probe-cache-roundtrip', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ck-probe-'))
+  const file = path.join(dir, 'probe.json')
+  const key = probeCacheKey('deepseek-account', 'deepseek-flash')
+
+  assert(readProbeCache(file, key) === null, 'a missing cache must read as null')
+
+  writeProbeCache(file, { key, verdict: 'allowed', control: true, stripped: true, at: new Date().toISOString() })
+  const hit = readProbeCache(file, key)
+  assert(hit !== null && hit.verdict === 'allowed', 'a written verdict must read back')
+
+  // 换个模型就必须重新探针，绝不能把别的模型结论套过来
+  assert(readProbeCache(file, probeCacheKey('deepseek-account', 'other')) === null, 'key must include the model')
+
+  writeProbeCache(file, { key, verdict: 'denied', control: false, stripped: false, at: new Date().toISOString() })
+  assert(readProbeCache(file, key)!.verdict === 'denied', 'a later verdict must overwrite the earlier one')
+})
+
+
 const failed = outcomes.filter((item) => !item.ok)
 for (const item of outcomes) {
   process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'} ${item.name} :: ${item.detail}\n`)
@@ -848,3 +870,5 @@ logEvent(failed.length === 0 ? 'info' : 'error', 'selftest.summary', {
 
 process.stdout.write(`\nself-test summary: ${outcomes.length - failed.length} passed, ${failed.length} failed\n`)
 if (failed.length > 0) process.exitCode = 1
+
+// ---------------------------------------------------------------------------

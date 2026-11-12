@@ -41,3 +41,24 @@ export declare function probeStaleReasoning(stream: (request: any) => AsyncItera
     stripped: boolean;
     error?: string;
 }>;
+/**
+ * 探针裁决落盘缓存。
+ *
+ * 探针是异步的（要真发两条短请求）。如果每个进程启动都重新探，那么启动后最初那
+ * 几秒发出的请求会用「未剥离」的历史，与之后「已剥离」的历史字节不同：
+ *   1. 那几条请求白付一次全量前缀（实测 1.9M 字符 vs 常态 0.8M）；
+ *   2. 剥离一生效，前缀当场作废，再冷读一次（实测 miss 54,949 = ¥0.055）。
+ * 于是每次重启白付两次冷读，命中率被拉低到 98%。裁决与进程无关，落盘即可只探一次。
+ *
+ * key 带 provider/model/契约版本：换模型或改剥离逻辑都必须重探。
+ */
+export interface ProbeCacheEntry {
+    key: string;
+    verdict: ReasoningProbeVerdict;
+    control: boolean;
+    stripped: boolean;
+    at: string;
+}
+export declare function probeCacheKey(provider: unknown, model: unknown): string;
+export declare function readProbeCache(file: string, key: string): ProbeCacheEntry | null;
+export declare function writeProbeCache(file: string, entry: ProbeCacheEntry): boolean;

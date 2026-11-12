@@ -17,9 +17,15 @@
  *   - 删空了的 assistant 消息补一个占位 text，避免出现空 content（宿主会拒）；
  *   - 纯函数：同一条消息永远产出同一个结果，前缀保持字节稳定。
  */
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.stripStaleReasoning = stripStaleReasoning;
 exports.probeStaleReasoning = probeStaleReasoning;
+exports.probeCacheKey = probeCacheKey;
+exports.readProbeCache = readProbeCache;
+exports.writeProbeCache = writeProbeCache;
 const REASONING_TYPES = new Set(['reasoning', 'thinking', 'reasoning-delta']);
 function stripStaleReasoning(messages, retainRecent = 6) {
     if (!Array.isArray(messages) || messages.length === 0)
@@ -102,3 +108,33 @@ async function probeStaleReasoning(stream, options) {
         return { verdict: 'denied', control: true, stripped: false, error: String(error) };
     }
 }
+function probeCacheKey(provider, model) {
+    return ['v1', String(provider ?? ''), String(model ?? '')].join('|');
+}
+function readProbeCache(file, key) {
+    try {
+        const raw = JSON.parse(node_fs_1.default.readFileSync(file, 'utf8'));
+        if (!raw || raw.key !== key)
+            return null;
+        if (raw.verdict !== 'allowed' && raw.verdict !== 'denied' && raw.verdict !== 'inconclusive')
+            return null;
+        return raw;
+    }
+    catch {
+        return null;
+    }
+}
+function writeProbeCache(file, entry) {
+    try {
+        node_fs_1.default.mkdirSync(node_path_1.default.dirname(file), { recursive: true });
+        const temp = file + '.tmp';
+        node_fs_1.default.writeFileSync(temp, JSON.stringify(entry, null, 2), 'utf8');
+        node_fs_1.default.renameSync(temp, file);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+const node_fs_1 = __importDefault(require("node:fs"));
+const node_path_1 = __importDefault(require("node:path"));

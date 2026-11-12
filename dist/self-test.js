@@ -708,6 +708,21 @@ check('prefix.tool-pairing-validator', () => {
     const reversed = [ok[0], ok[2], ok[1]];
     assert(!(0, episode_evict_1.assertToolPairing)(reversed), 'result before call must fail');
 });
+// 27) 探针结论必须能跨进程复用：否则重启后第一轮不剥离 → 第二轮剥离 → 两次冷读
+// ---------------------------------------------------------------------------
+check('reasoning.probe-cache-roundtrip', () => {
+    const dir = node_fs_1.default.mkdtempSync(node_path_1.default.join(node_os_1.default.tmpdir(), 'ck-probe-'));
+    const file = node_path_1.default.join(dir, 'probe.json');
+    const key = (0, reasoning_drop_1.probeCacheKey)('deepseek-account', 'deepseek-flash');
+    assert((0, reasoning_drop_1.readProbeCache)(file, key) === null, 'a missing cache must read as null');
+    (0, reasoning_drop_1.writeProbeCache)(file, { key, verdict: 'allowed', control: true, stripped: true, at: new Date().toISOString() });
+    const hit = (0, reasoning_drop_1.readProbeCache)(file, key);
+    assert(hit !== null && hit.verdict === 'allowed', 'a written verdict must read back');
+    // 换个模型就必须重新探针，绝不能把别的模型结论套过来
+    assert((0, reasoning_drop_1.readProbeCache)(file, (0, reasoning_drop_1.probeCacheKey)('deepseek-account', 'other')) === null, 'key must include the model');
+    (0, reasoning_drop_1.writeProbeCache)(file, { key, verdict: 'denied', control: false, stripped: false, at: new Date().toISOString() });
+    assert((0, reasoning_drop_1.readProbeCache)(file, key).verdict === 'denied', 'a later verdict must overwrite the earlier one');
+});
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {
     process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'} ${item.name} :: ${item.detail}\n`);
@@ -721,3 +736,4 @@ for (const item of outcomes) {
 process.stdout.write(`\nself-test summary: ${outcomes.length - failed.length} passed, ${failed.length} failed\n`);
 if (failed.length > 0)
     process.exitCode = 1;
+// ---------------------------------------------------------------------------

@@ -41,7 +41,13 @@ import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modu
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
 import { evictOldEpisodes } from './modules/episode-evict'
-import { probeStaleReasoning, stripStaleReasoning } from './modules/reasoning-drop'
+import {
+  probeCacheKey,
+  probeStaleReasoning,
+  readProbeCache,
+  stripStaleReasoning,
+  writeProbeCache,
+} from './modules/reasoning-drop'
 import { ResponseCache } from './modules/response-cache'
 import { ToolPipe } from './modules/tool-pipe'
 import { priceFor, pricingLoadedLog } from './modules/pricing'
@@ -767,6 +773,26 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
      * 都成功时，才允许后续请求丢弃老 thinking。两条都是极短请求（maxTokens 8）。
      * 失败一律按不允许处理 —— 省钱的收益远小于一次 `content[].thinking` 报错的代价。
      */
+    /**
+     * 先吃落盘裁决：探针是异步的，如果每个进程都重新探，启动后最初几秒发出的
+     * 请求会带着「未剥离」的历史，与之后「已剥离」的历史字节不同 ——
+     * 那几条请求白付一次全量前缀，剥离一生效前缀又当场作废，再冷读一次。
+     * 实测每次重启因此多付 miss 54,949（≈¥0.055），命中率被压到 98%。
+     */
+    const probeFile = path.resolve(config.spillDir, '.reasoning-probe.json')
+    const probeKey = probeCacheKey('deepseek-account', 'deepseek-flash')
+    if (config.dropStaleReasoning === 'auto' && !staleReasoningProbed) {
+      const cached = readProbeCache(probeFile, probeKey)
+      if (cached) {
+        staleReasoningProbed = true
+        staleReasoningAllowed = cached.verdict === 'allowed'
+        logEvent('info', 'reasoning.probe_cached', {
+          module: 'ReasoningDrop',
+          verdict: cached.verdict,
+          at: cached.at,
+        })
+      }
+    }
     if (config.dropStaleReasoning === 'auto' && !staleReasoningProbed && process.env.CK_DISABLE_REASONING_PROBE !== '1') {
       staleReasoningProbed = true
       void probeStaleReasoning((request: any) => rawStream(request), {
@@ -775,6 +801,16 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       })
         .then((result) => {
           staleReasoningAllowed = result.verdict === 'allowed'
+          // 只有明确的 allowed/denied 才缓存；inconclusive 不缓存，下次重启重探。
+          if (result.verdict !== 'inconclusive') {
+            writeProbeCache(probeFile, {
+              key: probeKey,
+              verdict: result.verdict,
+              control: result.control,
+              stripped: result.stripped,
+              at: new Date().toISOString(),
+            })
+          }
           logEvent('info', 'reasoning.probe', {
             module: 'ReasoningDrop',
             verdict: result.verdict,
