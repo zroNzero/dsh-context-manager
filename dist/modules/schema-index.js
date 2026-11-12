@@ -265,8 +265,14 @@ function installSchemaCompressor(ctx, options = {}) {
             }
             const rewrite = options.rewriteHistory?.(request.messages) ?? null;
             let messages = rewrite?.messages ?? request.messages;
-            const rewriteSaved = rewrite?.saved ?? 0;
             const rewriteBeforeTokens = rewrite?.beforeTokens ?? rawMessagesTokens;
+            /**
+             * 由前后 token 数**推导**，绝不采信调用方传进来的 `saved`。
+             * 2026-11-12 事故：rewrite 把「字符差」填进 `saved`，而 `beforeTokens` 是 token 数，
+             * 面板拿两者相除，直接把 28.5% 的实际降幅显示成 66.6%（放大约 4 倍）。
+             * 现在唯一真值来源是 before/after 两个同单位量。
+             */
+            const rewriteSaved = Math.max(0, rewriteBeforeTokens - (rewrite?.afterTokens ?? rewriteBeforeTokens));
             const bucketPrompt = lastUserText(messages) ?? '';
             const bucket = (0, osiris_1.intentBucket)(bucketPrompt);
             let attendedTools = null;

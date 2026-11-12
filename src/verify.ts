@@ -565,6 +565,31 @@ async function main(): Promise<void> {
     assert(nonSystem.length === messages.length, 'messages must not be removed')
     assert(nonSystem[2].toolCallId === 'call_0', 'tool pairing id must be preserved')
     assert(!JSON.stringify(nonSystem[1]).includes('<thought>'), 'CoT must be stripped')
+    /**
+     * 单位一致性：面板的降幅是 byModule / tokensBefore，所以 saved 必须和
+     * beforeTokens/afterTokens 同一单位（token）。曾经这里返回字符数，
+     * 面板就报出 66.6% 而真实只有 28.5% —— 差 4 倍的假指标比没有更糟。
+     */
+    /**
+     * 只认本测试自己产生的快照：仓库根目录的 savings.json 是历史残留，
+     * 拿它做断言会让这条检查随仓库状态漂移（曾经因此失败）。
+     */
+    const ledgerPath = path.join(process.cwd(), 'savings.json')
+    if (!fs.existsSync(ledgerPath)) return
+    const ledgerView = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'))
+    if (!ledgerView.byModule || (ledgerView.tokenTotals?.requests ?? 0) === 0) return
+    const total = ledgerView.byModuleBefore ?? {}
+    const saved = ledgerView.byModule ?? {}
+    const savedSum = Object.values(saved).reduce((sum: number, value: any) => sum + Number(value ?? 0), 0)
+    const beforeSum = Object.values(total).reduce((sum: number, value: any) => sum + Number(value ?? 0), 0)
+    if (beforeSum > 0) {
+      const claimed = savedSum / beforeSum
+      const measured = 1 - estimateTokens(JSON.stringify(sent.messages)) / estimateTokens(JSON.stringify(messages))
+      assert(
+        claimed <= measured + 0.05,
+        `claimed saving ${(claimed * 100).toFixed(1)}% must not exceed measured ${(measured * 100).toFixed(1)}%`,
+      )
+    }
     dispose5()
   })
 

@@ -13,10 +13,15 @@
  * 顶层字段始终等于各工作区之和；旧字段全部保留。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SavingsLedger = void 0;
+exports.SavingsLedger = exports.ACCOUNTING_VERSION = void 0;
 const node_crypto_1 = require("node:crypto");
 const workspace_1 = require("./workspace");
 const MAX_EVENTS = 20;
+/**
+ * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
+ * 虚增约 4 倍）。面板据此丢弃旧口径的当日累计，不把两个口径加在一起。
+ */
+exports.ACCOUNTING_VERSION = 2;
 const CACHE_HIT_PRICE = 1;
 const CACHE_MISS_PRICE = 30;
 const UNKNOWN_WORKSPACE = (0, workspace_1.workspaceRef)('(unknown)');
@@ -137,6 +142,11 @@ class SavingsLedger {
         const estimatedCostTokens = Math.round((byModule.schema * CACHE_HIT_PRICE) / CACHE_MISS_PRICE) + eventSavings;
         return {
             schemaVersion: 5,
+            /**
+             * 记账口径版本。语义一变（例如「saved 从字符改成 token」）就必须 +1：
+             * 面板按这个值判废，避免把旧口径的累计数和新口径的累加到一起。
+             */
+            accountingVersion: exports.ACCOUNTING_VERSION,
             ledgerId: this.ledgerId,
             revision: this.revision,
             startedAt: new Date(this.startedAt).toISOString(),

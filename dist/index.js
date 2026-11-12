@@ -850,7 +850,16 @@ function apply(ctx, rawConfig = {}) {
                             messages: next,
                             beforeTokens: (0, contracts_1.estimateTokens)(JSON.stringify(messages)),
                             afterTokens: (0, contracts_1.estimateTokens)(JSON.stringify(next)),
-                            saved: Math.max(0, folded.stats.charsBefore - folded.stats.charsAfter),
+                            /**
+                             * 必须是「实测 token 差」，不能是字符差。
+                             *
+                             * 旧实现给的是 `charsBefore - charsAfter`（字符），而账本拿它当 token 用，
+                             * 同一行里 beforeTokens 又是 token —— 单位混用把降幅放大 4 倍，
+                             * 面板因此显示 52%~66%，而实测只有 28.5%。
+                             * 而且它只算了 fold 一项，strip/evict 省下的没进去。
+                             * 现在直接量「改前 token − 改后 token」，三个杠杆一次性覆盖。
+                             */
+                            saved: Math.max(0, (0, contracts_1.estimateTokens)(JSON.stringify(messages)) - (0, contracts_1.estimateTokens)(JSON.stringify(next))),
                             rewritten: folded.stats.folded,
                         };
                     };
@@ -1038,7 +1047,10 @@ function apply(ctx, rawConfig = {}) {
                     ledger.record('schema', savedTokens, 'tool schema descriptions', workspace, toolsBeforeTokens);
                 }
                 if ((rewriteSaved ?? 0) > 0) {
-                    ledger.record('extraction', rewriteSaved, 'history-rewrite', workspace, rewriteBeforeTokens);
+                    // 归到 fold（上下文缩减）桶：这是「历史被压掉多少」，不是抽取。
+                    // 之前记成 extraction，导致面板把 fold/reasoning-drop/episode-evict 全算成
+                    // "extraction"，而 fold 行永远是 0 —— 数字是真的，归属是错的。
+                    ledger.record('fold', rewriteSaved, 'history-rewrite', workspace, rewriteBeforeTokens);
                     (0, log_1.logEvent)('info', 'context.rewritten', {
                         module: 'HistoryRewriter',
                         sessionId,

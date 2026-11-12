@@ -39,6 +39,8 @@ export interface WorkspaceSavingsSnapshot {
 }
 export interface SavingsSnapshot {
     schemaVersion: 5;
+    /** 记账口径版本；口径变了就 +1，消费方必须丢弃旧口径的累计。 */
+    accountingVersion: number;
     /** 每次插件 apply 生成的新账本 id；消费方看到新 id 必须「替换」而不是累加。 */
     ledgerId: string;
     /** 同一账本内每次写盘递增，用于消费方去重。 */
@@ -68,6 +70,11 @@ export interface SavingsSnapshot {
     rejectedByAnchor: number;
     lastEvents: SavingsEvent[];
 }
+/**
+ * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
+ * 虚增约 4 倍）。面板据此丢弃旧口径的当日累计，不把两个口径加在一起。
+ */
+export declare const ACCOUNTING_VERSION = 2;
 export declare class SavingsLedger {
     private readonly ledgerId;
     private revision;
