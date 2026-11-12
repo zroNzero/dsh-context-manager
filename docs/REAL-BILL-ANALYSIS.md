@@ -674,3 +674,72 @@ system                    ≈ 251,831 字符 ≈ 63K token
 
 注意：这条杠杆**不会体现在 `realBill.reduction` 里**——那个指标是逐请求反事实，
 请求数减少不改变单次降幅。要看真实账单，必须同时看「每次请求成本 × 请求数」。
+
+---
+
+## 18. 红线、离线回放，与逐出的安全重启（2026-11-12 12:20Z）
+
+### 18.1 两次事故 → 四条红线
+
+见 `docs/REDLINES.md`。摘要：
+
+| 编号 | 红线 | 事故 |
+|---|---|---|
+| RL-1 | tool-call 与 tool-result 必须成对且**相邻** | `INVALID_REQUEST: tool_use ... without tool_result immediately after` |
+| RL-2 | assistant 消息必须是「模型会写出来的形状」 | `MALFORMED_RESPONSE: tool input is invalid JSON`（收据被当参数照抄） |
+| RL-3 | 当前轮 thinking 必须原样回传 | 三次 `content[].thinking must be passed back` |
+| RL-4 | 不拿理解力换 token | — |
+
+### 18.2 离线回放器：不再拿线上会话试错
+
+`tools/replay-verify.mjs`：用真实会话重建消息表，在**本机**跑任意「改消息表」的优化，
+逐窗口验证配对。这是红线第 6 条（能本机复现才允许上线）的执行体。
+
+第一次跑就发现两件事：
+
+1. **基线判否**——但那是采样假象：会话日志是进行中快照，最后一条 assistant 已发出
+   tool-call、结果还没落盘。回放时必须剪掉这个尾巴。
+2. **窗口切片判否**——同样是假象：切片会从一对调用/结果中间开始，剪掉开头的孤儿
+   tool 消息即可。
+
+**教训：先把测量工具本身修对，再谈结论。** 前两次事故里我都在这上面栽过。
+
+### 18.3 让逐出「由构造保证」安全
+
+旧版逐出会破坏配对（线上 `INVALID_REQUEST`）。现在加了三道锁，缺一不可：
+
+1. **局部不变量**：被逐出的调用必须**正好**是紧随其后的那段 tool 消息。
+   满足它，「整段删掉」等价于移除一段相邻的调用/结果，邻接关系保持不变，
+   按归纳法全局配对不可能被破坏。
+2. **全量校验**：`assertToolPairing` 按宿主报错的字面语义（**紧随其后**）逐条核对，
+   不是「之后某处」。
+3. **Fail-Closed**：校验不过就返回未改动的消息表，并记 `evictRejected`。
+
+另外禁止「部分逐出」——一条 assistant 里只要有一个调用没到阈值，整条不动。
+
+### 18.4 实测（真实 2669 条消息 × 6 个窗口）
+
+| 窗口 | 逐出 episode | 省下字符 | 占比 | 配对 |
+|---:|---:|---:|---:|---|
+| 200 | 33 | 73,004 | 27.0% | PASS |
+| 400 | 49 | 102,691 | 19.9% | PASS |
+| 700 | 77 | 170,321 | 18.9% | PASS |
+| 1000 | 102 | 214,972 | 17.9% | PASS |
+| 1400 | 150 | 301,920 | 15.8% | PASS |
+| 2669 | 348 | 655,060 | 17.7% | PASS |
+
+`minArgChars=300` 时为 24–32%（更激进）。默认取 600。
+
+### 18.5 前沿对照（联网，2026-11-12）
+
+| 来源 | 做法 | 与本项目的关系 |
+|---|---|---|
+| [Anthropic: Code execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) | 工具定义按需加载 + **结果在沙箱里先过滤再进上下文**，150K→2K token（98.7%） | 我们的「落盘 + 指针」是它的弱化版：它连指针都不留 |
+| [Programmatic tool calling](https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling) | `run_code` 收拢多次调用，减少往返 | 对应我们实测的 96.1% 单调用问题 |
+| [dsh-token-optimizer](https://github.com/Zoria-Lind/dsh-token-optimizer) | 同一宿主的分层管线，长会话省 40–60% 输入 | 与本项目同量级，可交叉验证口径 |
+| [Beyond Compaction: Structured Context Eviction](https://huggingface.co/papers/2606.11213) | 按 DAG 逐出已完成 episode | 正是 §18.3 的做法，论文还没给出「配对不变量」这一层 |
+| [Don't Break the Cache](https://arxiv.org/html/2601.06007v2) | 长程 agent 的 prompt cache 实证 | 支撑我们的「字节稳定」约束 |
+
+**共同结论**：前沿做法都不是「把内容摘要得更短」，而是**让不该进上下文的东西根本不进**。
+我们的 fold/evict 是在请求边界上补做这件事，方向一致；真正的上限在工具设计层（PTC），
+那需要改宿主工具，不是插件能单方面解决的。

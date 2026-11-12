@@ -100,12 +100,15 @@ export const Config = z.object({
   /**
    * 已完成工具调用「整对逐出」（武器库 #14/#15）。
    *
-   * **默认关闭**：2026-11-11 15:00Z 线上实测，逐出 116 个 episode 后整轮报
-   * `INVALID_REQUEST: tool_use ids were found without tool_result blocks
-   * immediately after`。配对完整性比省的钱重要得多——一次断轮的成本远超几轮省下的。
-   * 重新启用前必须先让 `assertToolPairing` 在长会话上零告警。
+   * 线上曾经害人（2026-11-11 15:00Z `INVALID_REQUEST: tool_use ... without
+   * tool_result immediately after`）。重新启用前补了三道锁，全部可离线验证：
+   *   1. 局部不变量：被逐出的调用必须**正好**是紧随其后的那段 tool 消息，
+   *      于是「整段删」按归纳法不可能破坏全局配对；
+   *   2. 全量配对校验：`assertToolPairing` 按「紧随其后」语义逐条核对；
+   *   3. Fail-Closed：校验不过就返回**未改动**的消息表。
+   * 离线回放（真实 2669 条消息 × 6 个窗口）全部 PASS，见 tools/replay-verify.mjs。
    */
-  episodeEvictEnabled: z.boolean().default(false),
+  episodeEvictEnabled: z.boolean().default(true),
   episodeEvictRetainRecent: z.number().int().nonnegative().default(8),
   episodeEvictMinArgChars: z.number().int().positive().default(600),
   /**
@@ -878,6 +881,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
                 evictedEpisodes: evicted.stats ? evicted.stats.episodes : 0,
                 evictSaved: evicted.stats ? evicted.stats.charsSaved : 0,
                 evictDropped: evicted.stats ? evicted.stats.droppedMessages : 0,
+                evictRejected: evicted.stats ? evicted.stats.rejected === true : false,
                 foldCharsSaved: folded.stats.charsBefore - folded.stats.charsAfter,
                 folded: folded.stats.folded,
                 stripAllowed: staleReasoningAllowed,

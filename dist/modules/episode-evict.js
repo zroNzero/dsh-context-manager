@@ -36,43 +36,53 @@ const CALL_TYPES = new Set(['tool-call']);
  * `INVALID_REQUEST: tool_use ids were found without tool_result blocks immediately after`。
  * 教训：任何「删消息」的优化都必须先能证明配对没被破坏，否则收益再大也不能上线。
  *
- * 检查两个方向：
- *   1. 每个 tool-call 的 id，必须在它**之后**存在同名 tool 结果；
- *   2. 每个 tool 结果，必须在它**之前**存在同名 tool-call。
- * 注意结果通常出现 caller 语境里，两方向都查才能真正排除孤儿。
+ * **按宿主报错的字面语义校验「紧随其后」**，而不是「之后某处」：
+ * 每个含 tool-call 的 assistant 消息，其后连续的 tool 消息必须恰好覆盖它的全部 id，
+ * 不多不少、顺序无关但必须相邻。多一条或少一条都算失败。
  */
 function assertToolPairing(messages) {
     if (!Array.isArray(messages))
         return false;
-    const callAt = new Map();
-    const resultAt = new Map();
-    messages.forEach((message, index) => {
-        if (message?.role === 'tool') {
-            const id = String(message?.toolCallId ?? message?.tool_call_id ?? '');
-            if (id)
-                resultAt.set(id, index);
+    const resultIds = new Set();
+    messages.forEach((message) => {
+        if (message?.role !== 'tool')
             return;
-        }
-        if (!Array.isArray(message?.content))
-            return;
-        for (const block of message.content) {
-            if (!CALL_TYPES.has(String(block?.type ?? '')))
-                continue;
-            const id = String(block?.id ?? '');
-            if (id)
-                callAt.set(id, index);
-        }
+        const id = String(message?.toolCallId ?? message?.tool_call_id ?? '');
+        if (id)
+            resultIds.add(id);
     });
-    for (const [id, index] of callAt) {
-        const result = resultAt.get(id);
-        if (result === undefined || result < index)
+    const callIds = new Set();
+    for (let index = 0; index < messages.length; index += 1) {
+        const message = messages[index];
+        if (message?.role !== 'assistant' || !Array.isArray(message?.content))
+            continue;
+        const ids = message.content
+            .filter((block) => CALL_TYPES.has(String(block?.type ?? '')))
+            .map((block) => String(block?.id ?? ''))
+            .filter((id) => id.length > 0);
+        if (ids.length === 0)
+            continue;
+        for (const id of ids)
+            callIds.add(id);
+        // 紧随其后的连续 tool 消息必须正好覆盖这些 id
+        const next = [];
+        let cursor = index + 1;
+        while (cursor < messages.length && messages[cursor]?.role === 'tool') {
+            next.push(String(messages[cursor]?.toolCallId ?? messages[cursor]?.tool_call_id ?? ''));
+            cursor += 1;
+        }
+        const want = new Set(ids);
+        const got = new Set(next);
+        if (want.size !== got.size)
             return false;
+        for (const id of want)
+            if (!got.has(id))
+                return false;
     }
-    for (const [id, index] of resultAt) {
-        const call = callAt.get(id);
-        if (call === undefined || call > index)
+    // 反向：每个 tool 结果都必须有对应的 tool-call
+    for (const id of resultIds)
+        if (!callIds.has(id))
             return false;
-    }
     return true;
 }
 function argText(value) {
@@ -131,8 +141,22 @@ function evictOldEpisodes(messages, options) {
         const bulk = calls.filter((block) => argText(block?.arguments).length > minArgChars);
         if (bulk.length !== calls.length)
             continue;
-        // 全部调用都必须有对应的 tool 结果，否则不能删（会留孤儿）。
-        if (bulk.some((block) => !resultIndex.has(String(block?.id ?? ''))))
+        /**
+         * 局部不变量：这些调用必须**正好**是紧随其后的那一段 tool 消息。
+         * 满足它，则「整段删掉」等价于把一段相邻的调用/结果一起移除——
+         * 相邻性对邻接消息依然成立，按归纳法全局配对不可能被破坏。
+         * 这是让逐出「由构造保证安全」而不是「事后祈祷」的关键一步。
+         */
+        const adjacent = [];
+        let cursor = index + 1;
+        while (cursor < messages.length && messages[cursor]?.role === 'tool') {
+            adjacent.push(String(messages[cursor]?.toolCallId ?? messages[cursor]?.tool_call_id ?? ''));
+            cursor += 1;
+        }
+        const want = new Set(bulk.map((block) => String(block?.id ?? '')));
+        if (adjacent.length !== want.size)
+            continue;
+        if (adjacent.some((id) => !want.has(id)))
             continue;
         const matchedResults = bulk.map((block) => resultIndex.get(String(block?.id ?? '')));
         let original = contentText(message.content);
@@ -179,7 +203,7 @@ function evictOldEpisodes(messages, options) {
      * 宁可这一轮一分钱不省，也不能让宿主拿到一份会被它拒绝的消息表。
      */
     if (!assertToolPairing(pruned)) {
-        return { messages, stats: { episodes: 0, droppedMessages: 0, charsSaved: 0, files: [] } };
+        return { messages, stats: { episodes: 0, droppedMessages: 0, charsSaved: 0, files: [], rejected: true } };
     }
     return { messages: pruned, stats };
 }

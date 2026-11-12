@@ -30,6 +30,8 @@ export interface EpisodeEvictStats {
     droppedMessages: number;
     charsSaved: number;
     files: string[];
+    /** 配对校验没过、已整体放弃的那一轮（Fail-Closed 标记，供日志观测）。 */
+    rejected?: boolean;
 }
 /**
  * 配对完整性硬校验（Fail-Closed 的唯一依据）。
@@ -38,10 +40,9 @@ export interface EpisodeEvictStats {
  * `INVALID_REQUEST: tool_use ids were found without tool_result blocks immediately after`。
  * 教训：任何「删消息」的优化都必须先能证明配对没被破坏，否则收益再大也不能上线。
  *
- * 检查两个方向：
- *   1. 每个 tool-call 的 id，必须在它**之后**存在同名 tool 结果；
- *   2. 每个 tool 结果，必须在它**之前**存在同名 tool-call。
- * 注意结果通常出现 caller 语境里，两方向都查才能真正排除孤儿。
+ * **按宿主报错的字面语义校验「紧随其后」**，而不是「之后某处」：
+ * 每个含 tool-call 的 assistant 消息，其后连续的 tool 消息必须恰好覆盖它的全部 id，
+ * 不多不少、顺序无关但必须相邻。多一条或少一条都算失败。
  */
 export declare function assertToolPairing(messages: any[]): boolean;
 export declare function evictOldEpisodes(messages: any[], options: EpisodeEvictOptions): {
