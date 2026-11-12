@@ -87,6 +87,10 @@ export interface BillingBucket {
     actualCost: number;
     counterfactualCost: number;
     savedCost: number;
+    /** 少发的 prompt token（按本请求实测 tokens-per-char 系数换算）。 */
+    removedPromptTokens: number;
+    /** 少发的输出 token（effort 反事实差额）。 */
+    avoidedOutputTokens: number;
 }
 export interface BillingSnapshot {
     schemaVersion: 1;
@@ -103,6 +107,12 @@ export interface BillingSnapshot {
     missTokens: number;
     hitTokens: number;
     outputTokens: number;
+    /** 实测 prompt token 总量 = hit + miss（provider 口径）。 */
+    promptTokens: number;
+    /** 少发的 prompt token 总量（锚定实测 tokens-per-char 系数，不是 chars/4）。 */
+    removedTokens: number;
+    /** 少发的输出 token 总量（effort 反事实差额）。 */
+    avoidedOutputTokens: number;
     cacheHitRate: number;
     unverifiedOutputTokens: number;
     byPurpose: Record<string, BillingBucket>;

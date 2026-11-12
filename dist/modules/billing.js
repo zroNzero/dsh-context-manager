@@ -54,6 +54,8 @@ const emptyBucket = () => ({
     actualCost: 0,
     counterfactualCost: 0,
     savedCost: 0,
+    removedPromptTokens: 0,
+    avoidedOutputTokens: 0,
 });
 const addTo = (bucket, record) => {
     bucket.requests += 1;
@@ -63,6 +65,8 @@ const addTo = (bucket, record) => {
     bucket.actualCost += record.actualCost;
     bucket.counterfactualCost += record.counterfactualCost;
     bucket.savedCost += record.savedCost;
+    bucket.removedPromptTokens += record.removedPromptTokens;
+    bucket.avoidedOutputTokens += record.avoidedOutputTokens ?? 0;
 };
 const reductionOf = (actual, counterfactual) => counterfactual > 0 ? Math.max(0, 1 - actual / counterfactual) : 0;
 /**
@@ -188,6 +192,16 @@ class BillingLedger {
         return {
             schemaVersion: 1,
             requests: total.requests,
+            /**
+             * 实测口径（不是 chars/4 估算）：
+             *   promptTokens / outputTokens 来自 provider usage；
+             *   removedTokens / avoidedOutputTokens 是「本请求少发的量」，
+             *   由被移除的字符数 × 该请求实测的 tokens-per-char 系数换算，
+             *   因此锚定在真实计费上，可作为省钱 KPI 的分子。
+             */
+            promptTokens: total.hitTokens + total.missTokens,
+            removedTokens: total.removedPromptTokens,
+            avoidedOutputTokens: total.avoidedOutputTokens,
             requestsWithoutReduction: this.noReduction,
             actualCost: total.actualCost,
             counterfactualCost: total.counterfactualCost,
