@@ -322,16 +322,20 @@ check('savings.restore-across-restart', () => {
   const snap = first.snapshot()
 
   const second = new SavingsLedger()
-  assert(second.restore(snap) === true, 'restore must accept v5 snapshot')
+  assert(second.restore(snap) === true, 'restore must accept current snapshot')
   second.record('schema', 300, 'schema', a, 1000)
+  second.recordRequestTokens(a, 3000, 2500)
   const after = second.snapshot()
 
   assert(Object.keys(after.byWorkspace).length === 2, 'workspaces must survive restart')
-  assert(after.totalSavedTokens === snap.totalSavedTokens + 300, `total=${after.totalSavedTokens}`)
-  assert(after.byWorkspace[a.id]!.totalSavedTokens === 1200, 'workspace A total after restore')
-  assert(after.byModuleBefore.schema === 4000, `before=${after.byModuleBefore.schema}`)
+  // 真实口径延续：A 原本 (5000−4100)=900，新增 (3000−2500)=500 → 1400
+  assert(after.byWorkspace[a.id]!.totalSavedTokens === 1400, `A real=${after.byWorkspace[a.id]!.totalSavedTokens}`)
+  assert(after.byWorkspace[a.id]!.causalReductions === 1200, 'A causal after restore')
   assert(after.startedAt === snap.startedAt, 'startedAt must be preserved')
-  assert(second.snapshot().schemaVersion === 5, 'schema version stays 5')
+
+  // 旧口径（accountingVersion < 3）必须拒绝，避免把虚高值带进新账本
+  const legacy = { ...snap, accountingVersion: 2 }
+  assert(new SavingsLedger().restore(legacy) === false, 'legacy accounting must not be restored')
 })
 
 check('memory.savings-accounting', () => {
@@ -366,15 +370,19 @@ check('savings.ledger-cost-model', () => {
   const snapshot = ledger.snapshot()
 
   assert(snapshot.schemaVersion === 5, `schemaVersion=${snapshot.schemaVersion}`)
+  assert(snapshot.accountingVersion === 3, `accountingVersion=${snapshot.accountingVersion}`)
   assert(snapshot.ledgerId.length > 0, 'ledgerId required')
   assert(Object.keys(snapshot.byWorkspace).length === 2, 'expected two workspaces')
-  assert(snapshot.totalSavedTokens === 2804, `prompt tokens removed=${snapshot.totalSavedTokens}`)
+  // 真实口径：Σ(before − after) = (10000−8000) + (5000−2500)
+  assert(snapshot.totalSavedTokens === 4500, `real saved=${snapshot.totalSavedTokens}`)
+  // 归因总量独立存放，不与真实量相加
+  assert(snapshot.causalReductions === 2804, `causal=${snapshot.causalReductions}`)
   assert(snapshot.byModuleBefore.schema === 10800, `schema before=${snapshot.byModuleBefore.schema}`)
   assert(snapshot.byModuleBefore.extraction === 100, `extraction before=${snapshot.byModuleBefore.extraction}`)
-  assert(snapshot.estimatedCostTokens === 190, `cost-aware estimate=${snapshot.estimatedCostTokens} (90 + 100)`)
   assert(snapshot.tokensBeforeTotal === 15000 && snapshot.tokensAfterTotal === 10500, 'before/after totals')
   const perWorkspace = snapshot.byWorkspace[workspaceA.id]!
-  assert(perWorkspace.totalSavedTokens === 2704, 'workspace A total')
+  assert(perWorkspace.totalSavedTokens === 2000, `workspace A real saved=${perWorkspace.totalSavedTokens}`)
+  assert(perWorkspace.causalReductions === 2704, `workspace A causal=${perWorkspace.causalReductions}`)
   assert(perWorkspace.byModuleBefore.schema === 10800, 'workspace A schema before')
   assert(perWorkspace.tokensBeforeTotal === 10000, 'workspace A before total')
 })

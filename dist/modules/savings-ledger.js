@@ -21,7 +21,7 @@ const MAX_EVENTS = 20;
  * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
  * 虚增约 4 倍）。面板据此丢弃旧口径的当日累计，不把两个口径加在一起。
  */
-exports.ACCOUNTING_VERSION = 2;
+exports.ACCOUNTING_VERSION = 3;
 const CACHE_HIT_PRICE = 1;
 const CACHE_MISS_PRICE = 30;
 const UNKNOWN_WORKSPACE = (0, workspace_1.workspaceRef)('(unknown)');
@@ -117,6 +117,10 @@ class SavingsLedger {
             return false;
         if (Number(snapshot.schemaVersion ?? 0) < 5)
             return false;
+        // 旧账本（accountingVersion < 3）把归因量与真实量混在一起累计，
+        // 恢复它们会把虚高值带进新一轮，因此拒绝并重新开始。
+        if (Number(snapshot.accountingVersion ?? 0) < exports.ACCOUNTING_VERSION)
+            return false;
         const byWorkspace = snapshot.byWorkspace;
         if (!byWorkspace || typeof byWorkspace !== 'object')
             return false;
@@ -164,13 +168,17 @@ class SavingsLedger {
         let tokensBeforeTotal = 0;
         let tokensAfterTotal = 0;
         for (const [id, agg] of this.workspaces) {
-            const wsTotal = Object.values(agg.byModule).reduce((sum, value) => sum + value, 0);
+            const causal = Object.values(agg.byModule).reduce((sum, value) => sum + value, 0);
+            // 唯一真实口径：Σ(每次请求的 before − after)。这是「本来要计费的 token 少发了多少」，
+            // 可直接对账；byModule 只是归因，不能再叠加到它上面（否则同一段历史会被重复计一次）。
+            const realSaved = Math.max(0, agg.tokensBefore - agg.tokensAfter);
             const eventSavings = agg.byModule.admission + agg.byModule.extraction + agg.byModule.dedup;
             const estimatedCostTokens = Math.round((agg.byModule.schema * CACHE_HIT_PRICE) / CACHE_MISS_PRICE) + eventSavings;
             byWorkspace[id] = {
                 workspace: agg.ref.path,
                 label: agg.ref.label,
-                totalSavedTokens: wsTotal,
+                totalSavedTokens: realSaved,
+                causalReductions: causal,
                 estimatedCostTokens,
                 perRequestSavings: agg.byModule.schema,
                 eventSavings,
@@ -183,7 +191,7 @@ class SavingsLedger {
                 tokensAfterTotal: agg.tokensAfter,
                 updatedAt: new Date(agg.updatedAt).toISOString(),
             };
-            totalSavedTokens += wsTotal;
+            totalSavedTokens += realSaved;
             events += agg.events;
             folds += agg.folds;
             tokensBeforeTotal += agg.tokensBefore;
@@ -193,6 +201,7 @@ class SavingsLedger {
                 byModuleBefore[key] += agg.byModuleBefore[key];
             }
         }
+        const causalReductions = Object.values(byModule).reduce((sum, value) => sum + value, 0);
         const eventSavings = byModule.admission + byModule.extraction + byModule.dedup;
         const estimatedCostTokens = Math.round((byModule.schema * CACHE_HIT_PRICE) / CACHE_MISS_PRICE) + eventSavings;
         return {
@@ -207,6 +216,8 @@ class SavingsLedger {
             startedAt: new Date(this.startedAt).toISOString(),
             updatedAt: new Date(this.updatedAt).toISOString(),
             totalSavedTokens,
+            /** 归因总量（仅解释「为什么少了」，与 totalSavedTokens 不可相加）。 */
+            causalReductions,
             byModule,
             byModuleBefore,
             perRequestSavings: byModule.schema,

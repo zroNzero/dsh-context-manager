@@ -23,7 +23,10 @@ export interface SavingsEvent {
 export interface WorkspaceSavingsSnapshot {
     workspace: string;
     label: string;
+    /** 真实口径：Σ 每请求 before − after（可直接对账）。 */
     totalSavedTokens: number;
+    /** 归因总量（各模块因果节省之和，不可与 totalSavedTokens 相加）。 */
+    causalReductions?: number;
     estimatedCostTokens: number;
     perRequestSavings: number;
     eventSavings: number;
@@ -47,8 +50,10 @@ export interface SavingsSnapshot {
     revision: number;
     startedAt: string;
     updatedAt: string;
-    /** 兼容字段：所有模块的「prompt token 减少量」之和（不是账单）。 */
+    /** 兼容字段：真实口径的 token 节省（Σ 每请求 before − after），可直接对账。 */
     totalSavedTokens: number;
+    /** 归因总量：各模块因果节省之和，仅用于解释来源，不可与 totalSavedTokens 相加。 */
+    causalReductions?: number;
     byModule: Record<SavingsModule, number>;
     /** 每个模块的原始大小（byModule 的节省 / byModuleBefore 原值 = 压缩率）。 */
     byModuleBefore: Record<SavingsModule, number>;
@@ -76,7 +81,7 @@ export interface SavingsSnapshot {
  * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
  * 虚增约 4 倍）。面板据此丢弃旧口径的当日累计，不把两个口径加在一起。
  */
-export declare const ACCOUNTING_VERSION = 2;
+export declare const ACCOUNTING_VERSION = 3;
 export declare class SavingsLedger {
     private readonly ledgerId;
     private revision;
