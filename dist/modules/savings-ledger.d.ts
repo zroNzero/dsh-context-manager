@@ -78,7 +78,7 @@ export declare const ACCOUNTING_VERSION = 2;
 export declare class SavingsLedger {
     private readonly ledgerId;
     private revision;
-    private readonly startedAt;
+    private startedAt;
     private updatedAt;
     private readonly workspaces;
     private readonly lastEvents;
@@ -90,6 +90,8 @@ export declare class SavingsLedger {
     noteFold(workspace?: WorkspaceRef): void;
     noteRejected(): void;
     private totalSaved;
+    /** 从上次运行的 savings.json 恢复累计（同一工作区跨重启延续，不再每次归零）。 */
+    restore(snapshot: any): boolean;
     snapshot(): SavingsSnapshot;
     /** Markdown 面板：按模块汇总 + 按工作区 + 最近事件。 */
     renderMarkdown(): string;

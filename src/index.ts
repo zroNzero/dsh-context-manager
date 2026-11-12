@@ -501,6 +501,22 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   const savingsMarkdown = path.resolve(process.cwd(), 'savings.md')
   const savingsJson = path.resolve(process.cwd(), 'savings.json')
   const realBillMarkdown = path.resolve(process.cwd(), 'real-bill.md')
+  // 跨重启延续累计：上一轮写下的 savings.json 若仍是 v5 结构，按工作区恢复。
+  try {
+    if (fs.existsSync(savingsJson)) {
+      const previous = JSON.parse(fs.readFileSync(savingsJson, 'utf8'))
+      if (ledger.restore(previous)) {
+        logEvent('info', 'savings.restored', {
+          module: 'SavingsLedger',
+          workspaces: Object.keys(previous.byWorkspace ?? {}).length,
+          totalSavedTokens: Number(previous.totalSavedTokens ?? 0),
+          startedAt: previous.startedAt,
+        })
+      }
+    }
+  } catch (error) {
+    logEvent('warn', 'savings.restore_failed', { module: 'SavingsLedger', error: String(error) })
+  }
   let savingsTimer: ReturnType<typeof setTimeout> | null = null
 
   const persistSavings = (): void => {

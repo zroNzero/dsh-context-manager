@@ -312,6 +312,28 @@ check('toolpipe.publish-resolve', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+check('savings.restore-across-restart', () => {
+  const a = workspaceRef('D:\\PC\\a')
+  const b = workspaceRef('D:\\PC\\b')
+  const first = new SavingsLedger()
+  first.record('schema', 900, 'schema', a, 3000)
+  first.record('fold', 100, 'fold', b, 400)
+  first.recordRequestTokens(a, 5000, 4100)
+  const snap = first.snapshot()
+
+  const second = new SavingsLedger()
+  assert(second.restore(snap) === true, 'restore must accept v5 snapshot')
+  second.record('schema', 300, 'schema', a, 1000)
+  const after = second.snapshot()
+
+  assert(Object.keys(after.byWorkspace).length === 2, 'workspaces must survive restart')
+  assert(after.totalSavedTokens === snap.totalSavedTokens + 300, `total=${after.totalSavedTokens}`)
+  assert(after.byWorkspace[a.id]!.totalSavedTokens === 1200, 'workspace A total after restore')
+  assert(after.byModuleBefore.schema === 4000, `before=${after.byModuleBefore.schema}`)
+  assert(after.startedAt === snap.startedAt, 'startedAt must be preserved')
+  assert(second.snapshot().schemaVersion === 5, 'schema version stays 5')
+})
+
 check('memory.savings-accounting', () => {
   const entries: MemoryEntry[] = []
   for (let index = 0; index < 20; index += 1) {

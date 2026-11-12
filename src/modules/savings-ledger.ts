@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SavingsLedger —— Token 节省账本（面板数据源，schemaVersion 5）。
  *
  * v5 新增：
@@ -105,7 +105,7 @@ function emptyModuleRecord(): Record<SavingsModule, number> {
 export class SavingsLedger {
   private readonly ledgerId = randomUUID()
   private revision = 0
-  private readonly startedAt = Date.now()
+  private startedAt = Date.now()
   private updatedAt = Date.now()
   private readonly workspaces = new Map<string, WorkspaceAgg>()
   private readonly lastEvents: SavingsEvent[] = []
@@ -180,6 +180,37 @@ export class SavingsLedger {
       for (const value of Object.values(agg.byModule)) total += value
     }
     return total
+  }
+
+  /** 从上次运行的 savings.json 恢复累计（同一工作区跨重启延续，不再每次归零）。 */
+  restore(snapshot: any): boolean {
+    if (!snapshot || typeof snapshot !== 'object') return false
+    if (Number(snapshot.schemaVersion ?? 0) < 5) return false
+    const byWorkspace = snapshot.byWorkspace
+    if (!byWorkspace || typeof byWorkspace !== 'object') return false
+    let restored = 0
+    for (const [id, raw] of Object.entries(byWorkspace as Record<string, any>)) {
+      if (!raw || typeof raw !== 'object') continue
+      const agg = this.aggFor({ id, path: String(raw.workspace ?? `(unknown)`), label: String(raw.label ?? `(unknown)`) })
+      for (const key of Object.keys(agg.byModule) as SavingsModule[]) {
+        agg.byModule[key] += Math.max(0, Math.round(Number(raw.byModule?.[key] ?? 0)))
+        agg.byModuleBefore[key] += Math.max(0, Math.round(Number(raw.byModuleBefore?.[key] ?? 0)))
+      }
+      agg.events += Math.max(0, Math.round(Number(raw.events ?? 0)))
+      agg.folds += Math.max(0, Math.round(Number(raw.folds ?? 0)))
+      agg.tokensBefore += Math.max(0, Math.round(Number(raw.tokensBeforeTotal ?? 0)))
+      agg.tokensAfter += Math.max(0, Math.round(Number(raw.tokensAfterTotal ?? 0)))
+      restored += 1
+    }
+    if (restored === 0) return false
+    if (typeof snapshot.startedAt === 'string') {
+      const started = Date.parse(snapshot.startedAt)
+      if (Number.isFinite(started)) this.startedAt = started
+    }
+    this.revision = Math.max(0, Math.round(Number(snapshot.revision ?? 0)))
+        this.rejected = Math.max(0, Math.round(Number(snapshot.rejectedByAnchor ?? 0)))
+    this.updatedAt = Date.now()
+    return true
   }
 
   snapshot(): SavingsSnapshot {
@@ -323,3 +354,5 @@ export class SavingsLedger {
     ].join('\n')
   }
 }
+
+
