@@ -330,7 +330,7 @@ async function main() {
         const post = hooks.get('tools/post-execute');
         const payload = bigCode(160);
         const decision = { kind: 'accept', content: [{ type: 'text', text: payload }] };
-        const output = await post({ tool: { name: 'read' } }, decision, async () => decision);
+        const output = await post({ tool: { name: 'pwsh' } }, decision, async () => decision);
         const returned = String(output?.content?.[0]?.text ?? '');
         assert(returned.length < payload.length * 0.6, `output not compressed enough: ${payload.length}->${returned.length}`);
         assert(returned.includes('class VerifyService'), 'class name lost');
@@ -1018,6 +1018,16 @@ async function main() {
         assert(summary.text.includes('input.userId = null'), '3-line pre-context missing');
         assert(summary.text.includes('caller = processOrder'), 'caller context missing');
         assert(summary.text.includes('NullPointerException'), 'error line missing');
+    });
+    await check('source reads are never compressed', async () => {
+        const post = hooks.get('tools/post-execute');
+        const payload = bigCode(160);
+        const decision = { kind: 'accept', content: [{ type: 'text', text: payload }] };
+        for (const name of ['read', 'grep', 'glob', 'edit']) {
+            const output = await post({ tool: { name } }, decision, async () => decision);
+            const returned = String(output?.content?.[0]?.text ?? '');
+            assert(returned === payload, `${name} output must pass through verbatim (${payload.length}->${returned.length})`);
+        }
     });
     await check('no console.log in sources', () => {
         const dir = node_path_1.default.resolve('src');

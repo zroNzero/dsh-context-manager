@@ -34,8 +34,20 @@ class SavingsLedger {
     startedAt = Date.now();
     updatedAt = Date.now();
     workspaces = new Map();
+    bySession = new Map();
     lastEvents = [];
     rejected = 0;
+    /** 记录会话归属，便于消费方按 sessionId 找到对应工作区。 */
+    recordSession(sessionId, ref) {
+        const id = String(sessionId || '');
+        if (!id)
+            return;
+        if (this.bySession.get(id) === ref.id)
+            return;
+        this.bySession.set(id, ref.id);
+        this.aggFor(ref);
+        this.revision += 1;
+    }
     aggFor(ref) {
         let agg = this.workspaces.get(ref.id);
         if (!agg) {
@@ -125,6 +137,13 @@ class SavingsLedger {
         }
         if (restored === 0)
             return false;
+        if (snapshot.bySession && typeof snapshot.bySession === 'object') {
+            for (const [sessionId, workspaceId] of Object.entries(snapshot.bySession)) {
+                if (typeof sessionId === 'string' && typeof workspaceId === 'string') {
+                    this.bySession.set(sessionId, workspaceId);
+                }
+            }
+        }
         if (typeof snapshot.startedAt === 'string') {
             const started = Date.parse(snapshot.startedAt);
             if (Number.isFinite(started))
@@ -198,6 +217,7 @@ class SavingsLedger {
             tokensAfterTotal,
             tokensBeforeTotalEstimated: true,
             byWorkspace,
+            bySession: Object.fromEntries(this.bySession),
             events,
             folds,
             rejectedByAnchor: this.rejected,

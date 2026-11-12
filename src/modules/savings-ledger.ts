@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SavingsLedger —— Token 节省账本（面板数据源，schemaVersion 5）。
  *
  * v5 新增：
@@ -71,6 +71,8 @@ export interface SavingsSnapshot {
   tokensBeforeTotalEstimated: true
   /** 按工作区分账。 */
   byWorkspace: Record<string, WorkspaceSavingsSnapshot>
+  /** 会话 → 工作区 id，供客户端按会话定位自己的工作区（无需解析路径）。 */
+  bySession: Record<string, string>
   events: number
   folds: number
   rejectedByAnchor: number
@@ -108,8 +110,19 @@ export class SavingsLedger {
   private startedAt = Date.now()
   private updatedAt = Date.now()
   private readonly workspaces = new Map<string, WorkspaceAgg>()
+  private readonly bySession = new Map<string, string>()
   private readonly lastEvents: SavingsEvent[] = []
   private rejected = 0
+
+  /** 记录会话归属，便于消费方按 sessionId 找到对应工作区。 */
+  recordSession(sessionId: string, ref: WorkspaceRef): void {
+    const id = String(sessionId || '')
+    if (!id) return
+    if (this.bySession.get(id) === ref.id) return
+    this.bySession.set(id, ref.id)
+    this.aggFor(ref)
+    this.revision += 1
+  }
 
   private aggFor(ref: WorkspaceRef): WorkspaceAgg {
     let agg = this.workspaces.get(ref.id)
@@ -203,6 +216,13 @@ export class SavingsLedger {
       restored += 1
     }
     if (restored === 0) return false
+    if (snapshot.bySession && typeof snapshot.bySession === 'object') {
+      for (const [sessionId, workspaceId] of Object.entries(snapshot.bySession as Record<string, unknown>)) {
+        if (typeof sessionId === 'string' && typeof workspaceId === 'string') {
+          this.bySession.set(sessionId, workspaceId)
+        }
+      }
+    }
     if (typeof snapshot.startedAt === 'string') {
       const started = Date.parse(snapshot.startedAt)
       if (Number.isFinite(started)) this.startedAt = started
@@ -281,6 +301,7 @@ export class SavingsLedger {
       tokensAfterTotal,
       tokensBeforeTotalEstimated: true,
       byWorkspace,
+      bySession: Object.fromEntries(this.bySession),
       events,
       folds,
       rejectedByAnchor: this.rejected,

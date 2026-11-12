@@ -65,6 +65,8 @@ export interface SavingsSnapshot {
     tokensBeforeTotalEstimated: true;
     /** 按工作区分账。 */
     byWorkspace: Record<string, WorkspaceSavingsSnapshot>;
+    /** 会话 → 工作区 id，供客户端按会话定位自己的工作区（无需解析路径）。 */
+    bySession: Record<string, string>;
     events: number;
     folds: number;
     rejectedByAnchor: number;
@@ -81,8 +83,11 @@ export declare class SavingsLedger {
     private startedAt;
     private updatedAt;
     private readonly workspaces;
+    private readonly bySession;
     private readonly lastEvents;
     private rejected;
+    /** 记录会话归属，便于消费方按 sessionId 找到对应工作区。 */
+    recordSession(sessionId: string, ref: WorkspaceRef): void;
     private aggFor;
     record(module: SavingsModule, tokens: number, detail?: string, workspace?: WorkspaceRef, beforeTokens?: number): void;
     /** 记录一次请求的 prompt token（压缩前/后）；只计统计，不产生“节省事件”。 */

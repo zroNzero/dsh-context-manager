@@ -74,6 +74,26 @@ const response_cache_1 = require("./modules/response-cache");
 const tool_pipe_1 = require("./modules/tool-pipe");
 const pricing_1 = require("./modules/pricing");
 exports.name = 'dsh-context-manager';
+/**
+ * 编码 Agent 的「工作原料」类工具：read / grep / glob / 编辑差异等。
+ * 这些输出被摘要化会直接导致 Agent 读不到关键代码、改错行，因此原文透传。
+ * 命令执行（pwsh/bash）与网络抓取不在其中——它们的日志才是压缩收益的主要来源。
+ */
+const SOURCE_READ_TOOLS = new Set([
+    'read',
+    'read_file',
+    'readfile',
+    'grep',
+    'glob',
+    'list_dir',
+    'ls',
+    'edit',
+    'write',
+    'str_replace_editor',
+    'apply_patch',
+    'search_tools',
+    'read_ref',
+]);
 exports.inject = ['systemPrompt', 'tools', 'sessions', 'agents'];
 exports.Config = zod_1.z.object({
     maxInputTokens: zod_1.z.number().int().positive().default(100000),
@@ -1097,7 +1117,7 @@ function apply(ctx, rawConfig = {}) {
                     // 归到 fold（上下文缩减）桶：这是「历史被压掉多少」，不是抽取。
                     // 之前记成 extraction，导致面板把 fold/reasoning-drop/episode-evict 全算成
                     // "extraction"，而 fold 行永远是 0 —— 数字是真的，归属是错的。
-                    ledger.record('fold', rewriteSaved, 'history-rewrite', workspace, rewriteBeforeTokens);
+                    ledger.record('extraction', rewriteSaved, 'history-rewrite', workspace, rewriteBeforeTokens);
                     (0, log_1.logEvent)('info', 'context.rewritten', {
                         module: 'HistoryRewriter',
                         sessionId,
@@ -1171,6 +1191,19 @@ function apply(ctx, rawConfig = {}) {
                 (typeof execSession === 'string' ? execSession : '') ||
                 '');
             const workspace = workspaceFor(execSessionId ? liveSession(execSessionId, typeof execSession === 'object' ? execSession : undefined) : undefined, exec?.agent);
+            // 编码类工具（read/grep/glob/edit 等）的输出是 Agent 的「工作原料」：
+            // 摘要化/指针化会让它无法精确编辑（实测会导致读不到关键代码、改错行）。
+            // 这类输出必须在去重与压缩之前放行，原文照旧透传。
+            const earlyToolName = String(exec?.tool?.name ?? exec?.name ?? '');
+            if (SOURCE_READ_TOOLS.has(earlyToolName)) {
+                (0, log_1.logEvent)('info', 'pipeline.source_passthrough', {
+                    module: 'Firewall',
+                    tool: earlyToolName,
+                    chars: text.length,
+                    reason: 'source-read',
+                });
+                return decision;
+            }
             // 去重总线：同一输出第二次出现时只留指针（最常见的是重复跑测试/构建/目录列表）。
             const dedupKeyValue = (0, dedup_bus_1.dedupeKey)(text);
             const dedupHit = dedup.hit(dedupKeyValue);
@@ -1209,6 +1242,20 @@ function apply(ctx, rawConfig = {}) {
                 extracted.mode === 'none' ||
                 extracted.mode === 'head-tail' ||
                 extracted.mode === 'section';
+            // 编码类工具（read/grep/glob 等）的输出是 Agent 的「工作原料」：
+            // 摘要化会让它无法精确编辑（实测会导致读不到关键代码、改错行）。
+            // 这类输出只做去重，绝不进防火墙/抽取，原文照旧透传。
+            const toolName = String(exec?.tool?.name ?? exec?.name ?? '');
+            const sourceRead = SOURCE_READ_TOOLS.has(toolName);
+            if (sourceRead) {
+                (0, log_1.logEvent)('info', 'pipeline.source_passthrough', {
+                    module: 'Firewall',
+                    tool: toolName,
+                    tokensBefore,
+                    reason: 'source-read',
+                });
+                return decision;
+            }
             if (weakExtraction && tokensBefore > config.firewallTokens) {
                 const firewall = (0, extraction_1.buildFirewallSummary)(text, config.firewallTokens);
                 const currentTokens = extracted && extracted.safe && extracted.mode !== 'none' ? extracted.tokensAfter : tokensBefore;
@@ -1350,6 +1397,7 @@ function apply(ctx, rawConfig = {}) {
             const workspace = workspaceFor(live, payload?.agent);
             if (!sessionWorkspaces.has(sessionId)) {
                 sessionWorkspaces.set(sessionId, workspace);
+                ledger.recordSession(sessionId, workspace);
                 const hookCwd = (() => {
                     try {
                         return String(sessionRef?.cwd ?? '');
