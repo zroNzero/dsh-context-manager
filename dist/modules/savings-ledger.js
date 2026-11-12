@@ -21,12 +21,35 @@ const MAX_EVENTS = 20;
  * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
  * 虚增约 4 倍）。面板据此丢弃旧口径的当日累计，不把两个口径加在一起。
  */
-exports.ACCOUNTING_VERSION = 3;
+exports.ACCOUNTING_VERSION = 4;
 const CACHE_HIT_PRICE = 1;
 const CACHE_MISS_PRICE = 30;
 const UNKNOWN_WORKSPACE = (0, workspace_1.workspaceRef)('(unknown)');
 function emptyModuleRecord() {
-    return { admission: 0, extraction: 0, dedup: 0, fold: 0, schema: 0 };
+    return { admission: 0, extraction: 0, dedup: 0, fold: 0, schema: 0, rewrite: 0 };
+}
+/**
+ * 金额折算：只按 token 与官方单价算，不掺入任何估算权重。
+ *
+ * 分类依据是「这些 token 本来会以什么价格计费」：
+ * - schema / fold / rewrite 削减的是请求前缀，本来按缓存命中价计；
+ * - extraction / admission / dedup 削减的是新产生的 token，本来按未命中价计。
+ *
+ * 这是「如果没省就会多付的钱」，不是账单差额；账单差额以 realBill 为准。
+ */
+function moneyEstimate(byModule, prices) {
+    const hit = prices?.hit ?? 0.02;
+    const miss = prices?.miss ?? 1;
+    const hitModules = ['schema', 'fold', 'rewrite'];
+    const byModuleCny = {};
+    let total = 0;
+    for (const key of Object.keys(byModule)) {
+        const price = hitModules.includes(key) ? hit : miss;
+        const cny = (byModule[key] / 1_000_000) * price;
+        byModuleCny[key] = Math.round(cny * 1e6) / 1e6;
+        total += cny;
+    }
+    return { currency: 'CNY', total: Math.round(total * 1e6) / 1e6, byModule: byModuleCny, basis: { hit, miss, hitModules } };
 }
 class SavingsLedger {
     ledgerId = (0, node_crypto_1.randomUUID)();
@@ -158,7 +181,7 @@ class SavingsLedger {
         this.updatedAt = Date.now();
         return true;
     }
-    snapshot() {
+    snapshot(prices) {
         const byWorkspace = {};
         const byModule = emptyModuleRecord();
         const byModuleBefore = emptyModuleRecord();
@@ -229,6 +252,7 @@ class SavingsLedger {
             tokensBeforeTotalEstimated: true,
             byWorkspace,
             bySession: Object.fromEntries(this.bySession),
+            money: moneyEstimate(byModule, prices),
             events,
             folds,
             rejectedByAnchor: this.rejected,

@@ -15,7 +15,7 @@
 import { randomUUID } from 'node:crypto'
 import { workspaceRef, type WorkspaceRef } from './workspace'
 
-export type SavingsModule = 'admission' | 'extraction' | 'dedup' | 'fold' | 'schema'
+export type SavingsModule = 'admission' | 'extraction' | 'dedup' | 'fold' | 'schema' | 'rewrite'
 
 export interface SavingsEvent {
   ts: string
@@ -78,6 +78,14 @@ export interface SavingsSnapshot {
   byWorkspace: Record<string, WorkspaceSavingsSnapshot>
   /** 会话 → 工作区 id，供客户端按会话定位自己的工作区（无需解析路径）。 */
   bySession: Record<string, string>
+  /** 按官方单价的金额折算（CNY）：分模块 + 合计，口径写在 basis 里。 */
+  money?: {
+    currency: 'CNY'
+    total: number
+    byModule: Record<string, number>
+    /** hit = 该模块削减的是缓存前缀（按命中价计），miss = 新增 token（按未命中价计）。 */
+    basis: { hit: number; miss: number; hitModules: string[] }
+  }
   events: number
   folds: number
   rejectedByAnchor: number
@@ -89,7 +97,7 @@ const MAX_EVENTS = 20
  * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
  * 虚增约 4 倍）。面板据此丢弃旧口径的当日累计，不把两个口径加在一起。
  */
-export const ACCOUNTING_VERSION = 3
+export const ACCOUNTING_VERSION = 4
 const CACHE_HIT_PRICE = 1
 const CACHE_MISS_PRICE = 30
 const UNKNOWN_WORKSPACE = workspaceRef('(unknown)')
@@ -106,7 +114,34 @@ interface WorkspaceAgg {
 }
 
 function emptyModuleRecord(): Record<SavingsModule, number> {
-  return { admission: 0, extraction: 0, dedup: 0, fold: 0, schema: 0 }
+  return { admission: 0, extraction: 0, dedup: 0, fold: 0, schema: 0, rewrite: 0 }
+}
+
+/**
+ * 金额折算：只按 token 与官方单价算，不掺入任何估算权重。
+ *
+ * 分类依据是「这些 token 本来会以什么价格计费」：
+ * - schema / fold / rewrite 削减的是请求前缀，本来按缓存命中价计；
+ * - extraction / admission / dedup 削减的是新产生的 token，本来按未命中价计。
+ *
+ * 这是「如果没省就会多付的钱」，不是账单差额；账单差额以 realBill 为准。
+ */
+function moneyEstimate(
+  byModule: Record<SavingsModule, number>,
+  prices?: { hit: number; miss: number },
+): NonNullable<SavingsSnapshot['money']> {
+  const hit = prices?.hit ?? 0.02
+  const miss = prices?.miss ?? 1
+  const hitModules: SavingsModule[] = ['schema', 'fold', 'rewrite']
+  const byModuleCny: Record<string, number> = {}
+  let total = 0
+  for (const key of Object.keys(byModule) as SavingsModule[]) {
+    const price = hitModules.includes(key) ? hit : miss
+    const cny = (byModule[key] / 1_000_000) * price
+    byModuleCny[key] = Math.round(cny * 1e6) / 1e6
+    total += cny
+  }
+  return { currency: 'CNY', total: Math.round(total * 1e6) / 1e6, byModule: byModuleCny, basis: { hit, miss, hitModules } }
 }
 
 export class SavingsLedger {
@@ -241,7 +276,7 @@ export class SavingsLedger {
     return true
   }
 
-  snapshot(): SavingsSnapshot {
+  snapshot(prices?: { hit: number; miss: number }): SavingsSnapshot {
     const byWorkspace: Record<string, WorkspaceSavingsSnapshot> = {}
     const byModule = emptyModuleRecord()
     const byModuleBefore = emptyModuleRecord()
@@ -317,6 +352,7 @@ export class SavingsLedger {
       tokensBeforeTotalEstimated: true,
       byWorkspace,
       bySession: Object.fromEntries(this.bySession),
+      money: moneyEstimate(byModule, prices),
       events,
       folds,
       rejectedByAnchor: this.rejected,

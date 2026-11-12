@@ -543,7 +543,12 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   const persistSavings = (): void => {
     try {
       // realBill 是 Gate 1 的唯一可信口径：全部来自 provider usage，不含估算。
-      const snapshot: Record<string, unknown> = { ...(ledger.snapshot() as unknown as Record<string, unknown>) }
+      const snapshot: Record<string, unknown> = {
+      ...(ledger.snapshot({
+        hit: priceFor('deepseek-flash').hit,
+        miss: priceFor('deepseek-flash').miss,
+      }) as unknown as Record<string, unknown>),
+    }
       snapshot.realBill = billing.snapshot()
       fs.writeFileSync(savingsJson, JSON.stringify(snapshot, null, 2), 'utf8')
       fs.writeFileSync(savingsMarkdown, `${ledger.renderMarkdown()}\n\n${billing.renderMarkdown()}`, 'utf8')
@@ -1108,7 +1113,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
           // 归到 fold（上下文缩减）桶：这是「历史被压掉多少」，不是抽取。
           // 之前记成 extraction，导致面板把 fold/reasoning-drop/episode-evict 全算成
           // "extraction"，而 fold 行永远是 0 —— 数字是真的，归属是错的。
-          ledger.record('extraction', rewriteSaved!, 'history-rewrite', workspace, rewriteBeforeTokens)
+          ledger.record('rewrite', rewriteSaved!, 'history-rewrite', workspace, rewriteBeforeTokens)
           logEvent('info', 'context.rewritten', {
             module: 'HistoryRewriter',
             sessionId,

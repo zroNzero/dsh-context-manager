@@ -12,7 +12,7 @@
  * 顶层字段始终等于各工作区之和；旧字段全部保留。
  */
 import { type WorkspaceRef } from './workspace';
-export type SavingsModule = 'admission' | 'extraction' | 'dedup' | 'fold' | 'schema';
+export type SavingsModule = 'admission' | 'extraction' | 'dedup' | 'fold' | 'schema' | 'rewrite';
 export interface SavingsEvent {
     ts: string;
     module: SavingsModule;
@@ -72,6 +72,18 @@ export interface SavingsSnapshot {
     byWorkspace: Record<string, WorkspaceSavingsSnapshot>;
     /** 会话 → 工作区 id，供客户端按会话定位自己的工作区（无需解析路径）。 */
     bySession: Record<string, string>;
+    /** 按官方单价的金额折算（CNY）：分模块 + 合计，口径写在 basis 里。 */
+    money?: {
+        currency: 'CNY';
+        total: number;
+        byModule: Record<string, number>;
+        /** hit = 该模块削减的是缓存前缀（按命中价计），miss = 新增 token（按未命中价计）。 */
+        basis: {
+            hit: number;
+            miss: number;
+            hitModules: string[];
+        };
+    };
     events: number;
     folds: number;
     rejectedByAnchor: number;
@@ -81,7 +93,7 @@ export interface SavingsSnapshot {
  * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
  * 虚增约 4 倍）。面板据此丢弃旧口径的当日累计，不把两个口径加在一起。
  */
-export declare const ACCOUNTING_VERSION = 3;
+export declare const ACCOUNTING_VERSION = 4;
 export declare class SavingsLedger {
     private readonly ledgerId;
     private revision;
@@ -102,7 +114,10 @@ export declare class SavingsLedger {
     private totalSaved;
     /** 从上次运行的 savings.json 恢复累计（同一工作区跨重启延续，不再每次归零）。 */
     restore(snapshot: any): boolean;
-    snapshot(): SavingsSnapshot;
+    snapshot(prices?: {
+        hit: number;
+        miss: number;
+    }): SavingsSnapshot;
     /** Markdown 面板：按模块汇总 + 按工作区 + 最近事件。 */
     renderMarkdown(): string;
 }

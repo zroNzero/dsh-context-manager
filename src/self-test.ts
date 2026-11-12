@@ -370,7 +370,7 @@ check('savings.ledger-cost-model', () => {
   const snapshot = ledger.snapshot()
 
   assert(snapshot.schemaVersion === 5, `schemaVersion=${snapshot.schemaVersion}`)
-  assert(snapshot.accountingVersion === 3, `accountingVersion=${snapshot.accountingVersion}`)
+  assert(snapshot.accountingVersion === 4, `accountingVersion=${snapshot.accountingVersion}`)
   assert(snapshot.ledgerId.length > 0, 'ledgerId required')
   assert(Object.keys(snapshot.byWorkspace).length === 2, 'expected two workspaces')
   // 真实口径：Σ(before − after) = (10000−8000) + (5000−2500)
