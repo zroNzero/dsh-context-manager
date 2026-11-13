@@ -77,11 +77,16 @@ export interface SavingsSnapshot {
         currency: 'CNY';
         total: number;
         byModule: Record<string, number>;
-        /** hit = 该模块削减的是缓存前缀（按命中价计），miss = 新增 token（按未命中价计）。 */
+        /**
+         * 折算口径：混合单价 = cacheHitRate × hit + (1 − cacheHitRate) × miss。
+         * cacheHitRate 来自 provider usage 实测（measured=true），缺失时按 0.98 兜底。
+         */
         basis: {
             hit: number;
             miss: number;
-            hitModules: string[];
+            cacheHitRate: number;
+            blended: number;
+            measured: boolean;
         };
     };
     events: number;
@@ -117,6 +122,7 @@ export declare class SavingsLedger {
     snapshot(prices?: {
         hit: number;
         miss: number;
+        cacheHitRate?: number;
     }): SavingsSnapshot;
     /** Markdown 面板：按模块汇总 + 按工作区 + 最近事件。 */
     renderMarkdown(): string;

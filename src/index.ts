@@ -542,14 +542,17 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
   const persistSavings = (): void => {
     try {
+      const bill = billing.snapshot()
       // realBill 是 Gate 1 的唯一可信口径：全部来自 provider usage，不含估算。
       const snapshot: Record<string, unknown> = {
-      ...(ledger.snapshot({
-        hit: priceFor('deepseek-flash').hit,
-        miss: priceFor('deepseek-flash').miss,
-      }) as unknown as Record<string, unknown>),
-    }
-      snapshot.realBill = billing.snapshot()
+        ...(ledger.snapshot({
+          hit: priceFor('deepseek-flash').hit,
+          miss: priceFor('deepseek-flash').miss,
+          // 实测缓存命中率：金额折算按它加权命中价/未命中价，而非按模块猜。
+          cacheHitRate: bill.cacheHitRate,
+        }) as unknown as Record<string, unknown>),
+      }
+      snapshot.realBill = bill
       fs.writeFileSync(savingsJson, JSON.stringify(snapshot, null, 2), 'utf8')
       fs.writeFileSync(savingsMarkdown, `${ledger.renderMarkdown()}\n\n${billing.renderMarkdown()}`, 'utf8')
       fs.writeFileSync(realBillMarkdown, billing.renderMarkdown(), 'utf8')

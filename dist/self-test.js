@@ -319,6 +319,18 @@ check('savings.ledger-cost-model', () => {
     ledger.recordRequestTokens(workspaceA, 10000, 8000);
     ledger.recordRequestTokens(workspaceB, 5000, 2500);
     const snapshot = ledger.snapshot();
+    // 折算单价：命中率加权。96.6% 命中 → 0.966×0.02 + 0.034×1 = 0.05332 元/百万
+    const priced = ledger.snapshot({ hit: 0.02, miss: 1, cacheHitRate: 0.966 });
+    assert(priced.money !== undefined, 'money must be present when prices are supplied');
+    assert(Math.abs(priced.money.basis.blended - 0.05332) < 1e-6, `blended=${priced.money.basis.blended}`);
+    assert(priced.money.basis.measured === true, 'measured hit rate must be flagged');
+    // 金额按模块归因相加（归因总量不一定等于 totalSavedTokens），单价必须统一是 blended。
+    const moduleSum = Object.values(priced.byModule).reduce((sum, v) => sum + v, 0);
+    assert(Math.abs(priced.money.total - (moduleSum / 1_000_000) * 0.05332) < 1e-6, `money total = moduleSum × blended: ${priced.money.total} vs moduleSum ${moduleSum}`);
+    // 未给命中率时按 98% 兜底
+    const fallback = ledger.snapshot({ hit: 0.02, miss: 1 }).money;
+    assert(Math.abs(fallback.basis.blended - (0.98 * 0.02 + 0.02 * 1)) < 1e-9, 'fallback hit rate is 98%');
+    assert(fallback.basis.measured === false, 'fallback must be flagged as not measured');
     assert(snapshot.schemaVersion === 5, `schemaVersion=${snapshot.schemaVersion}`);
     assert(snapshot.accountingVersion === 4, `accountingVersion=${snapshot.accountingVersion}`);
     assert(snapshot.ledgerId.length > 0, 'ledgerId required');

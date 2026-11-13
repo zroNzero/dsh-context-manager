@@ -29,27 +29,36 @@ function emptyModuleRecord() {
     return { admission: 0, extraction: 0, dedup: 0, fold: 0, schema: 0, rewrite: 0 };
 }
 /**
- * 金额折算：只按 token 与官方单价算，不掺入任何估算权重。
+ * 金额折算：官方单价 × 实测缓存命中率，不掺任何估算权重。
  *
- * 分类依据是「这些 token 本来会以什么价格计费」：
- * - schema / fold / rewrite 削减的是请求前缀，本来按缓存命中价计；
- * - extraction / admission / dedup 削减的是新产生的 token，本来按未命中价计。
+ * 混合单价 = 命中率 × 命中价 + (1 − 命中率) × 未命中价。
+ * 用这个单价乘所有节省 token，等价于「这些 token 若按本会话真实的命中结构计费，
+ * 本来要付多少钱」。命中率优先取 provider usage 实测值；没有实测时按 0.98
+ * （DSH 长会话的典型命中率）兜底，并在 basis 里标明来源。
  *
  * 这是「如果没省就会多付的钱」，不是账单差额；账单差额以 realBill 为准。
  */
 function moneyEstimate(byModule, prices) {
     const hit = prices?.hit ?? 0.02;
     const miss = prices?.miss ?? 1;
-    const hitModules = ['schema', 'fold', 'rewrite'];
+    const measuredRate = typeof prices?.cacheHitRate === 'number' && Number.isFinite(prices.cacheHitRate)
+        ? Math.min(1, Math.max(0, prices.cacheHitRate))
+        : null;
+    const cacheHitRate = measuredRate ?? 0.98;
+    const blended = cacheHitRate * hit + (1 - cacheHitRate) * miss;
     const byModuleCny = {};
     let total = 0;
     for (const key of Object.keys(byModule)) {
-        const price = hitModules.includes(key) ? hit : miss;
-        const cny = (byModule[key] / 1_000_000) * price;
+        const cny = (byModule[key] / 1_000_000) * blended;
         byModuleCny[key] = Math.round(cny * 1e6) / 1e6;
         total += cny;
     }
-    return { currency: 'CNY', total: Math.round(total * 1e6) / 1e6, byModule: byModuleCny, basis: { hit, miss, hitModules } };
+    return {
+        currency: 'CNY',
+        total: Math.round(total * 1e6) / 1e6,
+        byModule: byModuleCny,
+        basis: { hit, miss, cacheHitRate, blended: Math.round(blended * 1e6) / 1e6, measured: measuredRate !== null },
+    };
 }
 class SavingsLedger {
     ledgerId = (0, node_crypto_1.randomUUID)();
