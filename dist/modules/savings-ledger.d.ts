@@ -34,6 +34,8 @@ export interface WorkspaceSavingsSnapshot {
     byModule: Record<SavingsModule, number>;
     /** 每个模块的原始大小（用于计算每维压缩率）。 */
     byModuleBefore: Record<SavingsModule, number>;
+    /** 该工作区按官方单价折算的金额（CNY）。 */
+    moneyCny?: number;
     events: number;
     folds: number;
     tokensBeforeTotal: number;

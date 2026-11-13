@@ -39,6 +39,8 @@ export interface WorkspaceSavingsSnapshot {
   byModule: Record<SavingsModule, number>
   /** 每个模块的原始大小（用于计算每维压缩率）。 */
   byModuleBefore: Record<SavingsModule, number>
+  /** 该工作区按官方单价折算的金额（CNY）。 */
+  moneyCny?: number
   events: number
   folds: number
   tokensBeforeTotal: number
@@ -106,6 +108,8 @@ interface WorkspaceAgg {
   ref: WorkspaceRef
   byModule: Record<SavingsModule, number>
   byModuleBefore: Record<SavingsModule, number>
+  /** 该工作区按官方单价折算的金额（CNY）。 */
+  moneyCny?: number
   events: number
   folds: number
   tokensBefore: number
@@ -305,6 +309,7 @@ export class SavingsLedger {
         contextReduction: agg.byModule.fold,
         byModule: { ...agg.byModule },
         byModuleBefore: { ...agg.byModuleBefore },
+        moneyCny: Math.round(moneyEstimate(agg.byModule, prices).total * 1e6) / 1e6,
         events: agg.events,
         folds: agg.folds,
         tokensBeforeTotal: agg.tokensBefore,

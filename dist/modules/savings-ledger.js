@@ -208,6 +208,7 @@ class SavingsLedger {
                 contextReduction: agg.byModule.fold,
                 byModule: { ...agg.byModule },
                 byModuleBefore: { ...agg.byModuleBefore },
+                moneyCny: Math.round(moneyEstimate(agg.byModule, prices).total * 1e6) / 1e6,
                 events: agg.events,
                 folds: agg.folds,
                 tokensBeforeTotal: agg.tokensBefore,
