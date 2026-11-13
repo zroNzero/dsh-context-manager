@@ -93,6 +93,8 @@ export interface BillingRecord {
   /** effort 降档后省下的输出 token（按配对校准的比例折算）。 */
   avoidedOutputTokens: number
   savedHitTokens: number
+  /** 本请求实测缓存命中率（hit / (hit + miss)），savedHit/savedMiss 即按它拆分。 */
+  hitRate: number
   unverifiedOutputTokens: number
 }
 
@@ -266,6 +268,8 @@ export class BillingLedger {
       savedMissTokens,
       avoidedOutputTokens,
       savedHitTokens,
+      /** 本请求实测命中率：savedHitTokens/savedMissTokens 就是按它拆的，面板可据此复核。 */
+      hitRate: Math.round(hitRatio * 10000) / 10000,
       unverifiedOutputTokens: unverified,
     }
 

@@ -21,44 +21,12 @@ const MAX_EVENTS = 20;
  * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
  * 虚增约 4 倍）。面板据此丢弃旧口径的当日累计，不把两个口径加在一起。
  */
-exports.ACCOUNTING_VERSION = 4;
+exports.ACCOUNTING_VERSION = 5;
 const CACHE_HIT_PRICE = 1;
 const CACHE_MISS_PRICE = 30;
 const UNKNOWN_WORKSPACE = (0, workspace_1.workspaceRef)('(unknown)');
 function emptyModuleRecord() {
     return { admission: 0, extraction: 0, dedup: 0, fold: 0, schema: 0, rewrite: 0 };
-}
-/**
- * 金额折算：官方单价 × 实测缓存命中率，不掺任何估算权重。
- *
- * 混合单价 = 命中率 × 命中价 + (1 − 命中率) × 未命中价。
- * 用这个单价乘所有节省 token，等价于「这些 token 若按本会话真实的命中结构计费，
- * 本来要付多少钱」。命中率优先取 provider usage 实测值；没有实测时按 0.98
- * （DSH 长会话的典型命中率）兜底，并在 basis 里标明来源。
- *
- * 这是「如果没省就会多付的钱」，不是账单差额；账单差额以 realBill 为准。
- */
-function moneyEstimate(byModule, prices) {
-    const hit = prices?.hit ?? 0.02;
-    const miss = prices?.miss ?? 1;
-    const measuredRate = typeof prices?.cacheHitRate === 'number' && Number.isFinite(prices.cacheHitRate)
-        ? Math.min(1, Math.max(0, prices.cacheHitRate))
-        : null;
-    const cacheHitRate = measuredRate ?? 0.98;
-    const blended = cacheHitRate * hit + (1 - cacheHitRate) * miss;
-    const byModuleCny = {};
-    let total = 0;
-    for (const key of Object.keys(byModule)) {
-        const cny = (byModule[key] / 1_000_000) * blended;
-        byModuleCny[key] = Math.round(cny * 1e6) / 1e6;
-        total += cny;
-    }
-    return {
-        currency: 'CNY',
-        total: Math.round(total * 1e6) / 1e6,
-        byModule: byModuleCny,
-        basis: { hit, miss, cacheHitRate, blended: Math.round(blended * 1e6) / 1e6, measured: measuredRate !== null },
-    };
 }
 class SavingsLedger {
     ledgerId = (0, node_crypto_1.randomUUID)();
@@ -91,6 +59,10 @@ class SavingsLedger {
                 folds: 0,
                 tokensBefore: 0,
                 tokensAfter: 0,
+                moneyCny: 0,
+                moneyHitTokens: 0,
+                moneyMissTokens: 0,
+                moneyTurns: 0,
                 updatedAt: Date.now(),
             };
             this.workspaces.set(ref.id, agg);
@@ -123,6 +95,25 @@ class SavingsLedger {
         const agg = this.aggFor(workspace ?? UNKNOWN_WORKSPACE);
         agg.tokensBefore += before;
         agg.tokensAfter += after;
+        agg.updatedAt = Date.now();
+        this.revision += 1;
+        this.updatedAt = Date.now();
+    }
+    /**
+     * 记录一轮 LLM 调用的金额。
+     *
+     * 必须逐轮记账，不能先汇总 token 再乘平均命中率：每一轮的命中率不同，
+     * 峰谷价也不同，两者都是非线性的，事后平均会把误差抹进结果里。
+     */
+    recordTurn(workspace, input) {
+        const savedCny = Number(input.savedCny);
+        if (!Number.isFinite(savedCny) || savedCny <= 0)
+            return;
+        const agg = this.aggFor(workspace ?? UNKNOWN_WORKSPACE);
+        agg.moneyCny += savedCny;
+        agg.moneyHitTokens += Math.max(0, Math.round(Number(input.savedHitTokens) || 0));
+        agg.moneyMissTokens += Math.max(0, Math.round(Number(input.savedMissTokens) || 0));
+        agg.moneyTurns += 1;
         agg.updatedAt = Date.now();
         this.revision += 1;
         this.updatedAt = Date.now();
@@ -169,6 +160,11 @@ class SavingsLedger {
             agg.folds += Math.max(0, Math.round(Number(raw.folds ?? 0)));
             agg.tokensBefore += Math.max(0, Math.round(Number(raw.tokensBeforeTotal ?? 0)));
             agg.tokensAfter += Math.max(0, Math.round(Number(raw.tokensAfterTotal ?? 0)));
+            // 逐轮计的金额同样要跨重启延续，否则面板金额每次重启都归零。
+            agg.moneyCny += Math.max(0, Number(raw.moneyCny ?? 0));
+            agg.moneyTurns += Math.max(0, Math.round(Number(raw.moneyTurns ?? 0)));
+            agg.moneyHitTokens += Math.max(0, Math.round(Number(raw.moneyHitTokens ?? 0)));
+            agg.moneyMissTokens += Math.max(0, Math.round(Number(raw.moneyMissTokens ?? 0)));
             restored += 1;
         }
         if (restored === 0)
@@ -189,6 +185,34 @@ class SavingsLedger {
         this.rejected = Math.max(0, Math.round(Number(snapshot.rejectedByAnchor ?? 0)));
         this.updatedAt = Date.now();
         return true;
+    }
+    sumMoney(prices) {
+        let total = 0;
+        let savedHitTokens = 0;
+        let savedMissTokens = 0;
+        let turns = 0;
+        for (const agg of this.workspaces.values()) {
+            total += agg.moneyCny;
+            savedHitTokens += agg.moneyHitTokens;
+            savedMissTokens += agg.moneyMissTokens;
+            turns += agg.moneyTurns;
+        }
+        if (turns === 0 && total === 0)
+            return undefined;
+        const denom = savedHitTokens + savedMissTokens;
+        return {
+            currency: 'CNY',
+            total: Math.round(total * 1e6) / 1e6,
+            basis: {
+                mode: 'per-turn',
+                turns,
+                savedHitTokens,
+                savedMissTokens,
+                effectiveHitRate: denom > 0 ? Math.round((savedHitTokens / denom) * 10000) / 10000 : null,
+                hit: prices?.hit ?? 0.02,
+                miss: prices?.miss ?? 1,
+            },
+        };
     }
     snapshot(prices) {
         const byWorkspace = {};
@@ -219,6 +243,10 @@ class SavingsLedger {
                 byModuleBefore: { ...agg.byModuleBefore },
                 events: agg.events,
                 folds: agg.folds,
+                moneyCny: Math.round(agg.moneyCny * 1e6) / 1e6,
+                moneyTurns: agg.moneyTurns,
+                moneyHitTokens: agg.moneyHitTokens,
+                moneyMissTokens: agg.moneyMissTokens,
                 tokensBeforeTotal: agg.tokensBefore,
                 tokensAfterTotal: agg.tokensAfter,
                 updatedAt: new Date(agg.updatedAt).toISOString(),
@@ -261,7 +289,7 @@ class SavingsLedger {
             tokensBeforeTotalEstimated: true,
             byWorkspace,
             bySession: Object.fromEntries(this.bySession),
-            money: moneyEstimate(byModule, prices),
+            money: this.sumMoney(prices),
             events,
             folds,
             rejectedByAnchor: this.rejected,

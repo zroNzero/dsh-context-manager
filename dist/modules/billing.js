@@ -161,6 +161,8 @@ class BillingLedger {
             savedMissTokens,
             avoidedOutputTokens,
             savedHitTokens,
+            /** 本请求实测命中率：savedHitTokens/savedMissTokens 就是按它拆的，面板可据此复核。 */
+            hitRate: Math.round(hitRatio * 10000) / 10000,
             unverifiedOutputTokens: unverified,
         };
         // 口径修正（2026-11-11）：没有任何削减的请求也**必须**计入真实账单。

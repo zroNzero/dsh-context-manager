@@ -36,6 +36,12 @@ export interface WorkspaceSavingsSnapshot {
     byModuleBefore: Record<SavingsModule, number>;
     events: number;
     folds: number;
+    /** 该工作区逐轮累计的金额（CNY）。 */
+    moneyCny?: number;
+    /** 该工作区参与计价的轮次数。 */
+    moneyTurns?: number;
+    moneyHitTokens?: number;
+    moneyMissTokens?: number;
     tokensBeforeTotal: number;
     tokensAfterTotal: number;
     updatedAt: string;
@@ -72,21 +78,25 @@ export interface SavingsSnapshot {
     byWorkspace: Record<string, WorkspaceSavingsSnapshot>;
     /** 会话 → 工作区 id，供客户端按会话定位自己的工作区（无需解析路径）。 */
     bySession: Record<string, string>;
-    /** 按官方单价的金额折算（CNY）：分模块 + 合计，口径写在 basis 里。 */
+    /**
+     * 金额（CNY）：逐轮累加，每轮用该轮实测命中率与峰谷价单独计价。
+     * 不做「先汇总 token 再乘平均单价」，因为命中率与峰谷价都不是线性的。
+     */
     money?: {
         currency: 'CNY';
         total: number;
-        byModule: Record<string, number>;
-        /**
-         * 折算口径：混合单价 = cacheHitRate × hit + (1 − cacheHitRate) × miss。
-         * cacheHitRate 来自 provider usage 实测（measured=true），缺失时按 0.98 兜底。
-         */
         basis: {
+            mode: 'per-turn';
+            /** 参与计价的轮次数。 */
+            turns: number;
+            /** 各轮「省下的命中 token」之和。 */
+            savedHitTokens: number;
+            /** 各轮「省下的未命中 token」之和。 */
+            savedMissTokens: number;
+            /** 加权有效命中率 = savedHitTokens / (savedHitTokens + savedMissTokens)。 */
+            effectiveHitRate: number | null;
             hit: number;
             miss: number;
-            cacheHitRate: number;
-            blended: number;
-            measured: boolean;
         };
     };
     events: number;
@@ -98,7 +108,18 @@ export interface SavingsSnapshot {
  * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
  * 虚增约 4 倍）。面板据此丢弃旧口径的当日累计，不把两个口径加在一起。
  */
-export declare const ACCOUNTING_VERSION = 4;
+export declare const ACCOUNTING_VERSION = 5;
+/** 一轮 LLM 调用的计价输入，由 billing 侧按该轮 usage 算好后写入。 */
+export interface TurnMoneyInput {
+    /** 该轮省下的钱：Σ(省下的命中 token × 命中价 + 省下的未命中 token × 未命中价)。 */
+    savedCny: number;
+    savedHitTokens: number;
+    savedMissTokens: number;
+    /** 该轮实测命中率（hitTokens / promptTokens）。 */
+    hitRate: number;
+    /** 该轮所处的计价时段，便于面板解释峰谷差异。 */
+    window?: 'peak' | 'offpeak' | string;
+}
 export declare class SavingsLedger {
     private readonly ledgerId;
     private revision;
@@ -114,11 +135,19 @@ export declare class SavingsLedger {
     record(module: SavingsModule, tokens: number, detail?: string, workspace?: WorkspaceRef, beforeTokens?: number): void;
     /** 记录一次请求的 prompt token（压缩前/后）；只计统计，不产生“节省事件”。 */
     recordRequestTokens(workspace: WorkspaceRef | undefined, beforeTokens: number, afterTokens: number): void;
+    /**
+     * 记录一轮 LLM 调用的金额。
+     *
+     * 必须逐轮记账，不能先汇总 token 再乘平均命中率：每一轮的命中率不同，
+     * 峰谷价也不同，两者都是非线性的，事后平均会把误差抹进结果里。
+     */
+    recordTurn(workspace: WorkspaceRef | undefined, input: TurnMoneyInput): void;
     noteFold(workspace?: WorkspaceRef): void;
     noteRejected(): void;
     private totalSaved;
     /** 从上次运行的 savings.json 恢复累计（同一工作区跨重启延续，不再每次归零）。 */
     restore(snapshot: any): boolean;
+    private sumMoney;
     snapshot(prices?: {
         hit: number;
         miss: number;

@@ -579,6 +579,11 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
 
   // 会话 -> 工作区映射：schema 压缩发生在 llm 层，只能靠 sessionId 反查。
   const sessionWorkspaces = new Map<string, WorkspaceRef>()
+  /**
+   * 当前正在进行的这一轮（由 pre-step 写入、onUsage 读取）。
+   * 金额必须记到「产生这一轮的工作区」上，而不是全局汇总后再摊派。
+   */
+  let activeTurn: { workspace: WorkspaceRef; sessionId: string; startedAt: number } | null = null
   /** 最近一次 pre-step 的观测信号，供 prepareCall 前判定 reasoning effort。 */
   let effortContext: { userText: string; lastRole: string; toolErrored: boolean } | null = null
   /**
@@ -1074,6 +1079,17 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       effortContext: () => (lastEffort ? { effort: lastEffort.effort, baseline: lastEffort.baseline } : null),
       onUsage: ({ purpose, model, usage, beforeChars, afterChars, effort, baselineEffort }) => {
         const record = billing.record({ purpose, model, usage, beforeChars, afterChars, effort, baselineEffort })
+        if (record) {
+          // 逐轮把这一轮的金额写进账本：命中率与峰谷价都是该轮自身的实测值，
+          // 汇总时只做加法，不做「平均单价 × 总 token」这种事后折算。
+          ledger.recordTurn(activeTurn?.workspace, {
+            savedCny: record.savedCost,
+            savedHitTokens: record.savedHitTokens,
+            savedMissTokens: record.savedMissTokens,
+            hitRate: record.hitRate,
+            window: record.window,
+          })
+        }
         if (record) logEvent('debug', 'billing.recorded', {
           module: 'Billing',
           purpose: record.purpose,
@@ -1108,6 +1124,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         rewriteAfterTokens,
       }) => {
         const workspace = sessionWorkspaces.get(sessionId) ?? workspaceRef('(unknown)')
+        // 每个请求都会经过这里，是最可靠的「本轮属于哪个工作区」的锚点。
+        activeTurn = { workspace, sessionId, startedAt: Date.now() }
         ledger.recordRequestTokens(workspace, beforeTokens, afterTokens)
         if (savedTokens > 0) {
           ledger.record('schema', savedTokens, 'tool schema descriptions', workspace, toolsBeforeTokens)
@@ -1429,6 +1447,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
         })
       }
       const state = stateFor(sessionId)
+      // 标记本轮属于哪个工作区：onUsage 结算金额时按这个归属记账。
+      activeTurn = { workspace, sessionId, startedAt: Date.now() }
       const tokens = entries.reduce((sum, entry) => sum + estimateTokens(entry.text), 0)
       const maxSeq = entries.reduce((max, entry) => (entry.seq > max ? entry.seq : max), 0)
       const previousSent = state.lastSentSeq

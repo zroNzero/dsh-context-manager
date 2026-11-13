@@ -319,20 +319,28 @@ check('savings.ledger-cost-model', () => {
     ledger.recordRequestTokens(workspaceA, 10000, 8000);
     ledger.recordRequestTokens(workspaceB, 5000, 2500);
     const snapshot = ledger.snapshot();
-    // 折算单价：命中率加权。96.6% 命中 → 0.966×0.02 + 0.034×1 = 0.05332 元/百万
-    const priced = ledger.snapshot({ hit: 0.02, miss: 1, cacheHitRate: 0.966 });
-    assert(priced.money !== undefined, 'money must be present when prices are supplied');
-    assert(Math.abs(priced.money.basis.blended - 0.05332) < 1e-6, `blended=${priced.money.basis.blended}`);
-    assert(priced.money.basis.measured === true, 'measured hit rate must be flagged');
-    // 金额按模块归因相加（归因总量不一定等于 totalSavedTokens），单价必须统一是 blended。
-    const moduleSum = Object.values(priced.byModule).reduce((sum, v) => sum + v, 0);
-    assert(Math.abs(priced.money.total - (moduleSum / 1_000_000) * 0.05332) < 1e-6, `money total = moduleSum × blended: ${priced.money.total} vs moduleSum ${moduleSum}`);
-    // 未给命中率时按 98% 兜底
-    const fallback = ledger.snapshot({ hit: 0.02, miss: 1 }).money;
-    assert(Math.abs(fallback.basis.blended - (0.98 * 0.02 + 0.02 * 1)) < 1e-9, 'fallback hit rate is 98%');
-    assert(fallback.basis.measured === false, 'fallback must be flagged as not measured');
-    assert(snapshot.schemaVersion === 5, `schemaVersion=${snapshot.schemaVersion}`);
-    assert(snapshot.accountingVersion === 4, `accountingVersion=${snapshot.accountingVersion}`);
+    // 逐轮计价：每轮用自己的命中率与峰谷价单独算，再相加。
+    // 第 1 轮：命中率 0.98 → 省 5000 token 中 4900 命中 / 100 未命中（谷价 0.02 / 1.00）
+    ledger.recordTurn(workspaceA, { savedCny: (4900 * 0.02 + 100 * 1) / 1e6, savedHitTokens: 4900, savedMissTokens: 100, hitRate: 0.98, window: 'offpeak' });
+    // 第 2 轮：命中率只有 0.5，同样的 token 就贵得多（峰价翻倍）
+    ledger.recordTurn(workspaceA, { savedCny: ((2500 * 0.04 + 2500 * 2) / 1e6), savedHitTokens: 2500, savedMissTokens: 2500, hitRate: 0.5, window: 'peak' });
+    ledger.recordTurn(workspaceB, { savedCny: (1000 * 0.02 + 0) / 1e6, savedHitTokens: 1000, savedMissTokens: 0, hitRate: 1, window: 'offpeak' });
+    const priced = ledger.snapshot({ hit: 0.02, miss: 1 });
+    const money = priced.money;
+    const expected = (4900 * 0.02 + 100 * 1 + 2500 * 0.04 + 2500 * 2 + 1000 * 0.02) / 1e6;
+    assert(money.basis.mode === 'per-turn', 'money basis must be per-turn');
+    assert(money.basis.turns === 3, `turns=${money.basis.turns}`);
+    assert(Math.abs(money.total - expected) < 1e-9, `total ${money.total} != ${expected}`);
+    assert(money.basis.savedHitTokens === 8400 && money.basis.savedMissTokens === 2600, 'hit/miss tokens accumulate');
+    assert(Math.abs(money.basis.effectiveHitRate - 8400 / 11000) < 1e-4, `effectiveHitRate=${money.basis.effectiveHitRate}`);
+    // 关键反证：若先汇总 token 再乘平均命中率，第 2 轮的高价会被抹平，结果必然不同。
+    const naive = ((8400 + 2600) / 1_000_000) * ((8400 / 11000) * 0.02 + (2600 / 11000) * 1);
+    assert(Math.abs(naive - expected) > 1e-4, 'aggregate-then-multiply must differ from per-turn pricing');
+    // 各工作区的金额也各自累计，不共享全局值
+    assert(Math.abs(priced.byWorkspace[workspaceA.id].moneyCny - (4900 * 0.02 + 100 + 2500 * 0.04 + 2500 * 2) / 1e6) < 1e-9, 'workspace A money');
+    const snapshot2 = ledger.snapshot();
+    assert(snapshot2.schemaVersion === 5, `schemaVersion=${snapshot2.schemaVersion}`);
+    assert(snapshot2.accountingVersion === 5, `accountingVersion=${snapshot2.accountingVersion}`);
     assert(snapshot.ledgerId.length > 0, 'ledgerId required');
     assert(Object.keys(snapshot.byWorkspace).length === 2, 'expected two workspaces');
     // 真实口径：Σ(before − after) = (10000−8000) + (5000−2500)

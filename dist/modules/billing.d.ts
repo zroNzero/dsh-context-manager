@@ -77,6 +77,8 @@ export interface BillingRecord {
     /** effort 降档后省下的输出 token（按配对校准的比例折算）。 */
     avoidedOutputTokens: number;
     savedHitTokens: number;
+    /** 本请求实测缓存命中率（hit / (hit + miss)），savedHit/savedMiss 即按它拆分。 */
+    hitRate: number;
     unverifiedOutputTokens: number;
 }
 export interface BillingBucket {
