@@ -391,7 +391,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'dcm-header' },
-          h('div', { className: 'dcm-title' }, '上下文节省'),
+          h('div', { className: 'dcm-title' }, '节省'),
           h(
             'div',
             { className: 'dcm-subtitle' },
@@ -542,11 +542,30 @@ window.__ModuleLoader__.load({
             id: PANEL_ID,
             order: PANEL_ORDER,
             label: function () {
-              return '上下文节省'
+              return '节省'
             },
           },
           function (props) {
             return h(PanelIcon, { size: props && props.size })
+          },
+        )
+      })
+
+      // 会话内标签页：与「对话 / 上下文 / 编队」并列。
+      // id 用自己的名字 → 并肩新增一格；写 'chat' 会顶掉宿主那格。
+      // order 40 落在 fleet(30) 之后；label 传函数，切语言会重新求值。
+      ctx.slots.inject('conversation.view', function () {
+        return ctx.slots.register(
+          {
+            name: 'conversation.view',
+            id: 'savings',
+            order: 40,
+            label: function () {
+              return '节省'
+            },
+          },
+          function (props) {
+            return h(PanelPage, props || {})
           },
         )
       })
