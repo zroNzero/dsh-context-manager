@@ -289,6 +289,7 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'dcm-root' },
           h('div', { className: 'dcm-empty' }, '面板数据不可用：' + (state.error || '未知原因')),
+          h('div', { className: 'dcm-note' }, '请求地址：POST ' + ROUTE),
           h('div', { className: 'dcm-note' }, '插件本身不受影响；压缩与计费仍在正常运行。'),
         )
       }
