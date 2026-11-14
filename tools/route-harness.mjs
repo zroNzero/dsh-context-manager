@@ -87,6 +87,40 @@ const clientRoute = PANEL_ROUTE
 record('client-relative', !clientRoute.startsWith('/'), `client must stay relative, got ${clientRoute}`)
 record('client-resolves-to-host', `/${clientRoute}` === ROUTE, `/${clientRoute} != ${ROUTE}`)
 
+// --- 第三段：走 ctx.inject 的载体（服务晚于 apply 就绪时的真实路径） ---------
+{
+  const injectRoutes = new Map()
+  const injected = {
+    fetch: {
+      register(route) {
+        injectRoutes.set(route.path, route)
+        return async () => injectRoutes.delete(route.path)
+      },
+    },
+  }
+  let injectedReader = null
+  const injectDispose = registerPanelRoute(
+    {
+      // 关键：此时服务还不在，只能靠 inject 回调拿到载体
+      get: () => undefined,
+      inject(deps, fn) {
+        if (!Array.isArray(deps) || !deps.includes('connection')) throw new Error('inject deps wrong')
+        // 忠实模拟 Cordis：回调收到的是「载有该服务的 ctx」，要靠 .get 取服务
+        fn({ get: (name) => (name === 'connection' ? injected : undefined) })
+        return () => {}
+      },
+    },
+    () => summary,
+    (message) => {
+      injectedReader = message
+    },
+  )
+  record('inject-path-mounted', injectRoutes.has(ROUTE), `keys=${[...injectRoutes.keys()].join(',') || '(none)'}`)
+  record('inject-path-no-error', injectedReader === null, String(injectedReader))
+  injectDispose()
+  record('inject-path-disposed', injectRoutes.size === 0, `still ${injectRoutes.size}`)
+}
+
 if (failures.length > 0) {
   console.error('FAIL route harness')
   for (const line of failures) console.error('  - ' + line)

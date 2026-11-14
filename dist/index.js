@@ -1634,6 +1634,9 @@ function apply(ctx, rawConfig = {}) {
         catch { }
         return (0, panel_1.buildPanelSummary)({ snapshot, bill });
     };
+    // 无条件留痕：日志里出现这一行才说明跑的是「带面板的构建」。
+    // 面板 404 时先看这里——没有 attempt 就不是路由问题，而是进程还在跑旧 dist。
+    (0, log_1.logEvent)('info', 'panel.route.attempt', { route: panel_1.PANEL_ROUTE });
     const panelDispose = (0, panel_1.registerPanelRoute)(services, readPanel, (message) => {
         (0, log_1.logEvent)('warn', 'panel.route.unavailable', { message });
     }, (path) => {

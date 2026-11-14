@@ -37,7 +37,7 @@ import { CompressionBreaker } from './modules/breaker'
 import { DedupBus, dedupeKey } from './modules/dedup-bus'
 import { SavingsLedger } from './modules/savings-ledger'
 import { BillingLedger } from './modules/billing'
-import { buildPanelSummary, registerPanelRoute } from './panel'
+import { buildPanelSummary, registerPanelRoute, PANEL_ROUTE } from './panel'
 import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modules/workspace'
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
@@ -1635,6 +1635,9 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     } catch {}
     return buildPanelSummary({ snapshot, bill })
   }
+  // 无条件留痕：日志里出现这一行才说明跑的是「带面板的构建」。
+  // 面板 404 时先看这里——没有 attempt 就不是路由问题，而是进程还在跑旧 dist。
+  logEvent('info', 'panel.route.attempt', { route: PANEL_ROUTE })
   const panelDispose = registerPanelRoute(
     services,
     readPanel,
