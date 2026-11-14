@@ -4,6 +4,16 @@
   "description": "dsh-context-manager (CostKillerOrchestrator): cache-aligned context governance for DSH (Admission / Extraction / Memory / CacheAnchor / Routing / SchemaIndex / DedupBus)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": "./client.js",
+    "./panels": "./panels/index.js",
+    "./package.json": "./package.json",
+    "./*": "./*"
+  },
   "files": [
     "dist",
     "panels",
