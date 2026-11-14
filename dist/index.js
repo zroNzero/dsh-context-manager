@@ -1135,7 +1135,7 @@ function apply(ctx, rawConfig = {}) {
                 const workspace = sessionWorkspaces.get(sessionId) ?? (0, workspace_1.workspaceRef)('(unknown)');
                 // 每个请求都会经过这里，是最可靠的「本轮属于哪个工作区」的锚点。
                 activeTurn = { workspace, sessionId, startedAt: Date.now() };
-                ledger.recordRequestTokens(workspace, beforeTokens, afterTokens, sessionId);
+                ledger.recordRequestTokens(workspace, beforeTokens, afterTokens);
                 if (savedTokens > 0) {
                     ledger.record('schema', savedTokens, 'tool schema descriptions', workspace, toolsBeforeTokens);
                 }

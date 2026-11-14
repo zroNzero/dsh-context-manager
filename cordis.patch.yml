@@ -1,15 +1,3 @@
-# OpenKill / dsh-context-manager
-#
-# 两行：
-#   1) 记账与上下文治理（dist/index.js）
-#   2) 节省面板（panels/plugin.js）—— 侧栏「节省」页 + 会话内「节省」标签
-#
-# 面板独立成一行，因此面板出问题时可以单独禁用而不影响记账。
 - insert:
     - id: dsh-context-manager
       name: dsh-context-manager
-    - id: dsh-context-manager-panels
-      name: dsh-context-manager/panels/index.js
-      config:
-        panels:
-          enabled: true

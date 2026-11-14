@@ -4,50 +4,23 @@
   "description": "dsh-context-manager (CostKillerOrchestrator): cache-aligned context governance for DSH (Admission / Extraction / Memory / CacheAnchor / Routing / SchemaIndex / DedupBus)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    },
-    "./client": "./client.js",
-    "./panels": "./panels/index.js",
-    "./package.json": "./package.json",
-    "./*": "./*"
-  },
   "files": [
     "dist",
-    "panels",
-    "assets",
-    "client.js",
     "cordis.patch.yml"
   ],
   "scripts": {
     "build": "tsc",
     "test": "tsc && node dist/self-test.js",
     "verify": "tsc && node dist/verify.js",
-    "demo": "tsc && node dist/demo.js",
-    "test:panels": "node --test \"test/panels/*.test.mjs\""
+    "demo": "tsc && node dist/demo.js"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "immediately": true,
-      "inject": [
-        "@deepseek-ai/dsh-api-remotes",
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-sidebar-right"
-      ]
     }
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "jsdom": "^31.0.1",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
