@@ -37,6 +37,7 @@ import { CompressionBreaker } from './modules/breaker'
 import { DedupBus, dedupeKey } from './modules/dedup-bus'
 import { SavingsLedger } from './modules/savings-ledger'
 import { BillingLedger } from './modules/billing'
+import { buildPanelSummary, registerPanelRoute } from './panel'
 import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modules/workspace'
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
@@ -1086,6 +1087,8 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
             savedCny: record.savedCost,
             savedHitTokens: record.savedHitTokens,
             savedMissTokens: record.savedMissTokens,
+            savedOutTokens: record.avoidedOutputTokens,
+            actualCny: record.actualCost,
             hitRate: record.hitRate,
             window: record.window,
           })
@@ -1616,6 +1619,39 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
   } catch (error) {
     logEvent('warn', 'hook.preStep.failed', { error: String(error) })
   }
+
+  /**
+   * 面板数据源：只读路由，数据来自已落盘的账本 + 本进程 provider 实测账单。
+   * 任何一步失败都只是「面板没数据」，不影响压缩主链路。
+   */
+  const readPanel = (): ReturnType<typeof buildPanelSummary> => {
+    let snapshot: unknown = null
+    let bill: unknown = null
+    try {
+      snapshot = ledger.snapshot()
+    } catch {}
+    try {
+      bill = billing.snapshot()
+    } catch {}
+    return buildPanelSummary({ snapshot, bill })
+  }
+  const panelDispose = registerPanelRoute(services, readPanel, (message) => {
+    logEvent('warn', 'panel.route.unavailable', { message })
+  })
+  if (typeof panelDispose === 'function') disposers.push(panelDispose)
+
+  const panelDisposer = registerPanelRoute(
+    services,
+    () => {
+      let snapshot: any = null
+      try {
+        snapshot = ledger.snapshot()
+      } catch {}
+      return buildPanelSummary({ snapshot })
+    },
+    (message) => logEvent('warn', 'panel.route.unavailable', { message }),
+  )
+  if (typeof panelDisposer === 'function') disposers.push(panelDisposer)
 
   logEvent('info', 'apply.ready', { plugin: name, mode: 'full', routing: router.circuitOpen ? 'open' : 'closed' })
 

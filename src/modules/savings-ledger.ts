@@ -47,6 +47,8 @@ export interface WorkspaceSavingsSnapshot {
   moneyTurns?: number
   moneyHitTokens?: number
   moneyMissTokens?: number
+  /** 该工作区逐轮累计的「省下的输出 token」；与上面两项一起才能完整重建金额。 */
+  moneyOutTokens?: number
   tokensBeforeTotal: number
   tokensAfterTotal: number
   updatedAt: string
@@ -134,17 +136,25 @@ interface WorkspaceAgg {
   /** 被省下来的 token 中，按命中价/未命中价分别计了多少（用于反算有效命中率）。 */
   moneyHitTokens: number
   moneyMissTokens: number
+  /** 被省下来的输出 token 累计（与上面两项一起构成金额的三个分量）。 */
+  moneyOutTokens: number
   /** 参与计价的轮次数。 */
   moneyTurns: number
+  /** 逐轮累计的真实花费（CNY），与 moneyCny 同源同口径。 */
+  moneyActualCny: number
   updatedAt: number
 }
 
 /** 一轮 LLM 调用的计价输入，由 billing 侧按该轮 usage 算好后写入。 */
 export interface TurnMoneyInput {
-  /** 该轮省下的钱：Σ(省下的命中 token × 命中价 + 省下的未命中 token × 未命中价)。 */
+  /** 该轮省下的钱：Σ(省下的命中 token × 命中价 + 省下的未命中 token × 未命中价 + 省下的输出 token × 输出价)。 */
   savedCny: number
   savedHitTokens: number
   savedMissTokens: number
+  /** 该轮省下的输出 token（effort 降档的反事实输出量）；缺省按 0 计。 */
+  savedOutTokens?: number
+  /** 该轮真实花费（CNY）；用于算「省下 / (省下 + 实花)」这个可审计的百分比。 */
+  actualCny?: number
   /** 该轮实测命中率（hitTokens / promptTokens）。 */
   hitRate: number
   /** 该轮所处的计价时段，便于面板解释峰谷差异。 */
@@ -190,7 +200,9 @@ export class SavingsLedger {
         moneyCny: 0,
         moneyHitTokens: 0,
         moneyMissTokens: 0,
+        moneyOutTokens: 0,
         moneyTurns: 0,
+        moneyActualCny: 0,
         updatedAt: Date.now(),
       }
       this.workspaces.set(ref.id, agg)
@@ -246,6 +258,9 @@ export class SavingsLedger {
     agg.moneyCny += savedCny
     agg.moneyHitTokens += Math.max(0, Math.round(Number(input.savedHitTokens) || 0))
     agg.moneyMissTokens += Math.max(0, Math.round(Number(input.savedMissTokens) || 0))
+    agg.moneyOutTokens += Math.max(0, Math.round(Number(input.savedOutTokens) || 0))
+    const actualCny = Number(input.actualCny)
+    if (Number.isFinite(actualCny) && actualCny > 0) agg.moneyActualCny += actualCny
     agg.moneyTurns += 1
     agg.updatedAt = Date.now()
     this.revision += 1

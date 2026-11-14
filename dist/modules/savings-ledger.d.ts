@@ -42,6 +42,8 @@ export interface WorkspaceSavingsSnapshot {
     moneyTurns?: number;
     moneyHitTokens?: number;
     moneyMissTokens?: number;
+    /** 该工作区逐轮累计的「省下的输出 token」；与上面两项一起才能完整重建金额。 */
+    moneyOutTokens?: number;
     tokensBeforeTotal: number;
     tokensAfterTotal: number;
     updatedAt: string;
@@ -111,10 +113,14 @@ export interface SavingsSnapshot {
 export declare const ACCOUNTING_VERSION = 5;
 /** 一轮 LLM 调用的计价输入，由 billing 侧按该轮 usage 算好后写入。 */
 export interface TurnMoneyInput {
-    /** 该轮省下的钱：Σ(省下的命中 token × 命中价 + 省下的未命中 token × 未命中价)。 */
+    /** 该轮省下的钱：Σ(省下的命中 token × 命中价 + 省下的未命中 token × 未命中价 + 省下的输出 token × 输出价)。 */
     savedCny: number;
     savedHitTokens: number;
     savedMissTokens: number;
+    /** 该轮省下的输出 token（effort 降档的反事实输出量）；缺省按 0 计。 */
+    savedOutTokens?: number;
+    /** 该轮真实花费（CNY）；用于算「省下 / (省下 + 实花)」这个可审计的百分比。 */
+    actualCny?: number;
     /** 该轮实测命中率（hitTokens / promptTokens）。 */
     hitRate: number;
     /** 该轮所处的计价时段，便于面板解释峰谷差异。 */

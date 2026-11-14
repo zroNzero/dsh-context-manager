@@ -65,6 +65,7 @@ const breaker_1 = require("./modules/breaker");
 const dedup_bus_1 = require("./modules/dedup-bus");
 const savings_ledger_1 = require("./modules/savings-ledger");
 const billing_1 = require("./modules/billing");
+const panel_1 = require("./panel");
 const workspace_1 = require("./modules/workspace");
 const history_rewriter_1 = require("./modules/history-rewriter");
 const prefix_spill_1 = require("./modules/prefix-spill");
@@ -1102,6 +1103,8 @@ function apply(ctx, rawConfig = {}) {
                         savedCny: record.savedCost,
                         savedHitTokens: record.savedHitTokens,
                         savedMissTokens: record.savedMissTokens,
+                        savedOutTokens: record.avoidedOutputTokens,
+                        actualCny: record.actualCost,
                         hitRate: record.hitRate,
                         window: record.window,
                     });
@@ -1614,6 +1617,38 @@ function apply(ctx, rawConfig = {}) {
     catch (error) {
         (0, log_1.logEvent)('warn', 'hook.preStep.failed', { error: String(error) });
     }
+    /**
+     * 面板数据源：只读路由，数据来自已落盘的账本 + 本进程 provider 实测账单。
+     * 任何一步失败都只是「面板没数据」，不影响压缩主链路。
+     */
+    const readPanel = () => {
+        let snapshot = null;
+        let bill = null;
+        try {
+            snapshot = ledger.snapshot();
+        }
+        catch { }
+        try {
+            bill = billing.snapshot();
+        }
+        catch { }
+        return (0, panel_1.buildPanelSummary)({ snapshot, bill });
+    };
+    const panelDispose = (0, panel_1.registerPanelRoute)(services, readPanel, (message) => {
+        (0, log_1.logEvent)('warn', 'panel.route.unavailable', { message });
+    });
+    if (typeof panelDispose === 'function')
+        disposers.push(panelDispose);
+    const panelDisposer = (0, panel_1.registerPanelRoute)(services, () => {
+        let snapshot = null;
+        try {
+            snapshot = ledger.snapshot();
+        }
+        catch { }
+        return (0, panel_1.buildPanelSummary)({ snapshot });
+    }, (message) => (0, log_1.logEvent)('warn', 'panel.route.unavailable', { message }));
+    if (typeof panelDisposer === 'function')
+        disposers.push(panelDisposer);
     (0, log_1.logEvent)('info', 'apply.ready', { plugin: exports.name, mode: 'full', routing: router.circuitOpen ? 'open' : 'closed' });
     return () => {
         (0, log_1.logEvent)('info', 'apply.dispose', { plugin: exports.name });

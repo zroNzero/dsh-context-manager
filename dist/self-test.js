@@ -31,6 +31,7 @@ const billing_1 = require("./modules/billing");
 const effort_policy_1 = require("./modules/effort-policy");
 const workspace_1 = require("./modules/workspace");
 const log_1 = require("./log");
+const panel_1 = require("./panel");
 const outcomes = [];
 function check(name, fn) {
     try {
@@ -768,6 +769,39 @@ check('reasoning.probe-cache-roundtrip', () => {
     assert((0, reasoning_drop_1.readProbeCache)(file, (0, reasoning_drop_1.probeCacheKey)('deepseek-account', 'other')) === null, 'key must include the model');
     (0, reasoning_drop_1.writeProbeCache)(file, { key, verdict: 'denied', control: false, stripped: false, at: new Date().toISOString() });
     assert((0, reasoning_drop_1.readProbeCache)(file, key).verdict === 'denied', 'a later verdict must overwrite the earlier one');
+});
+// ---------------------------------------------------------------------------
+// 28) 面板金额必须能用「三个 token 分量 × 官方单价」逐项复算，误差只允许浮点噪声
+// ---------------------------------------------------------------------------
+check('panel.money-is-recomputable', () => {
+    const hitPrice = 0.02;
+    const missPrice = 1;
+    const outPrice = 4;
+    const bucket = (label, hit, miss, out) => ({
+        workspace: 'd:\\pc\\demo',
+        label,
+        totalSavedTokens: hit + miss,
+        moneyHitTokens: hit,
+        moneyMissTokens: miss,
+        moneyOutTokens: out,
+        moneyTurns: 3,
+        moneyCny: (hit * hitPrice + miss * missPrice + out * outPrice) / 1_000_000,
+    });
+    const snapshot = {
+        revision: 7,
+        startedAt: '2026-11-14T00:00:00.000Z',
+        byWorkspace: { a: bucket('demo', 1_000_000, 2_000, 500), b: bucket('other', 250_000, 1_000, 0) },
+        events: [],
+    };
+    const panel = (0, panel_1.buildPanelSummary)({ snapshot, bill: null });
+    const expected = ((1_250_000 * hitPrice) + (3_000 * missPrice) + (500 * outPrice)) / 1_000_000;
+    assert(Math.abs(panel.totals.savedMoney - expected) < 1e-9, `money must equal Σ(hit×0.02 + miss×1 + out×4)/M; got ${panel.totals.savedMoney} want ${expected}`);
+    assert(panel.totals.savedOutTokens === 500, `output component must be exposed, got ${panel.totals.savedOutTokens}`);
+    // 标签页金额之和必须等于总额（逐工作区分账不丢钱）
+    const rowSum = panel.workspaces.reduce((sum, row) => sum + row.savedMoney, 0);
+    assert(Math.abs(rowSum - panel.totals.savedMoney) < 1e-9, 'workspace rows must sum to the total');
+    const tokenSum = panel.workspaces.reduce((sum, row) => sum + row.savedOutTokens, 0);
+    assert(tokenSum === panel.totals.savedOutTokens, 'workspace output tokens must sum to the total');
 });
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {

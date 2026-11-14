@@ -62,7 +62,9 @@ class SavingsLedger {
                 moneyCny: 0,
                 moneyHitTokens: 0,
                 moneyMissTokens: 0,
+                moneyOutTokens: 0,
                 moneyTurns: 0,
+                moneyActualCny: 0,
                 updatedAt: Date.now(),
             };
             this.workspaces.set(ref.id, agg);
@@ -113,6 +115,10 @@ class SavingsLedger {
         agg.moneyCny += savedCny;
         agg.moneyHitTokens += Math.max(0, Math.round(Number(input.savedHitTokens) || 0));
         agg.moneyMissTokens += Math.max(0, Math.round(Number(input.savedMissTokens) || 0));
+        agg.moneyOutTokens += Math.max(0, Math.round(Number(input.savedOutTokens) || 0));
+        const actualCny = Number(input.actualCny);
+        if (Number.isFinite(actualCny) && actualCny > 0)
+            agg.moneyActualCny += actualCny;
         agg.moneyTurns += 1;
         agg.updatedAt = Date.now();
         this.revision += 1;
