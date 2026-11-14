@@ -47,12 +47,15 @@ function ratio(part, whole) {
  *
  * 每行只读三个已落盘的字段，不再做任何二次推算，保证「标签页金额之和 == 总额」。
  */
-function readWorkspaces(snapshot) {
+function readWorkspaces(snapshot, scopeId = null) {
     const source = snapshot?.byWorkspace;
     if (source === null || typeof source !== 'object')
         return [];
     const rows = [];
     for (const [id, raw] of Object.entries(source)) {
+        // 会话作用域下只保留本会话所属工作区，其余工作区一律不出现。
+        if (scopeId !== null && id !== scopeId)
+            continue;
         const bucket = raw !== null && typeof raw === 'object' ? raw : {};
         const savedHitTokens = num(bucket.moneyHitTokens);
         const savedMissTokens = num(bucket.moneyMissTokens);
@@ -156,7 +159,7 @@ function shareOf(saved, actual) {
  * 逐轮 `removedPromptTokens` 的加法，`actualMoney` 是逐轮 `actualCost` 的加法。
  * 日志补齐的部分没有工作区归属，单独放进 `unattributed*`，不做任何按比例摊派。
  */
-function readDays(snapshot, todayKey) {
+function readDays(snapshot, todayKey, scopeId = null) {
     const byDate = new Map();
     const dayOf = (date) => {
         const existing = byDate.get(date);
@@ -166,7 +169,13 @@ function readDays(snapshot, todayKey) {
         byDate.set(date, created);
         return created;
     };
-    const globalDays = snapshot && typeof snapshot.byDay === 'object' && snapshot.byDay !== null ? snapshot.byDay : {};
+    // 限定工作区时，日总额改由该工作区自己的 byDay 求和；全局日账含「无法归属」的
+    // 历史轮次，混进来就不再是「只看这个工作区」了。
+    const globalDays = scopeId !== null
+        ? {}
+        : snapshot && typeof snapshot.byDay === 'object' && snapshot.byDay !== null
+            ? snapshot.byDay
+            : {};
     for (const [date, bucket] of Object.entries(globalDays)) {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
             continue;
@@ -180,6 +189,9 @@ function readDays(snapshot, todayKey) {
     // 逐工作区归集；这些行一定也计入了全局日账，所以只用于「归属」，不再累加总额。
     const buckets = snapshot && typeof snapshot.byWorkspace === 'object' && snapshot.byWorkspace !== null ? snapshot.byWorkspace : {};
     for (const [id, bucket] of Object.entries(buckets)) {
+        // 限定工作区时必须过滤：否则「只看本工作区」会把别人的日账也加进来。
+        if (scopeId !== null && id !== scopeId)
+            continue;
         const perDay = bucket && typeof bucket.byDay === 'object' && bucket.byDay !== null ? bucket.byDay : {};
         for (const [date, dayBucket] of Object.entries(perDay)) {
             if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
@@ -241,7 +253,10 @@ function readDays(snapshot, todayKey) {
 }
 function buildPanelSummary(input) {
     const snapshot = input.snapshot ?? null;
-    const workspaces = readWorkspaces(snapshot);
+    const sessionId = typeof input.sessionId === 'string' && input.sessionId ? input.sessionId : null;
+    const mapped = sessionId ? (snapshot?.bySession?.[sessionId] ?? null) : null;
+    const scopeId = typeof mapped === 'string' && mapped ? mapped : null;
+    const workspaces = readWorkspaces(snapshot, sessionId ? (scopeId ?? '__none__') : null);
     let savedHitTokens = 0;
     let savedMissTokens = 0;
     let savedOutTokens = 0;
@@ -258,7 +273,7 @@ function buildPanelSummary(input) {
     }
     const savedTokens = savedHitTokens + savedMissTokens;
     const generatedAt = new Date(input.now ?? Date.now()).toISOString();
-    const dayView = readDays(snapshot, (0, day_ledger_1.dayKeyOf)(input.now ?? Date.now()));
+    const dayView = readDays(snapshot, (0, day_ledger_1.dayKeyOf)(input.now ?? Date.now()), sessionId ? (scopeId ?? '__none__') : null);
     return {
         ok: true,
         schema: exports.PANEL_SCHEMA_VERSION,
@@ -270,6 +285,13 @@ function buildPanelSummary(input) {
         workspaces,
         today: dayView.today,
         days: dayView.days,
+        scope: {
+            sessionId,
+            workspaceId: scopeId,
+            workspaceLabel: scopeId !== null && workspaces.length > 0 ? workspaces[0].label : null,
+            resolved: scopeId !== null,
+            all: sessionId === null,
+        },
         process: readProcessBill(input.bill),
         formula: { ...FORMULA },
     };
@@ -304,7 +326,21 @@ function registerPanelRoute(host, read, onError, onMount) {
             path,
             methods: ['POST'],
             requestBody: 'buffered',
-            fetch: () => jsonResponse(read()),
+            /**
+             * 会话标签页会把 sessionId 放进 POST body；带 sessionId 时只返回该会话所属
+             * 工作区的数据（与 dsh-context 的 detail 路由同构），不带则返回全部工作区汇总。
+             */
+            fetch: async (request) => {
+                let sessionId = null;
+                try {
+                    const body = await request.json();
+                    if (body !== null && typeof body === 'object' && typeof body.sessionId === 'string' && body.sessionId) {
+                        sessionId = body.sessionId;
+                    }
+                }
+                catch { }
+                return jsonResponse(read(sessionId));
+            },
         });
         onMount?.(path);
         if (typeof handle === 'function') {

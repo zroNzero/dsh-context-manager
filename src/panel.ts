@@ -109,6 +109,19 @@ export interface PanelSummary {
   today: PanelDay
   /** 最近若干天的按日汇总，新→旧。 */
   days: PanelDay[]
+  /**
+   * 作用域。传了 sessionId（会话标签页）时只返回该会话所属工作区的数据；
+   * 未传（左侧栏独立页面）时返回全部工作区的汇总。
+   */
+  scope: {
+    sessionId: string | null
+    workspaceId: string | null
+    workspaceLabel: string | null
+    /** true = 已解析到具体工作区。 */
+    resolved: boolean
+    /** true = 未限定作用域，返回全部工作区。 */
+    all: boolean
+  }
   /** 按工作区分账，金额降序；面板的每个标签页对应一行。 */
   workspaces: PanelWorkspaceRow[]
   /** 本进程 provider 实测账单；没有记录时为 null。 */
@@ -155,11 +168,13 @@ function ratio(part: number, whole: number): number {
  *
  * 每行只读三个已落盘的字段，不再做任何二次推算，保证「标签页金额之和 == 总额」。
  */
-function readWorkspaces(snapshot: any): PanelWorkspaceRow[] {
+function readWorkspaces(snapshot: any, scopeId: string | null = null): PanelWorkspaceRow[] {
   const source = snapshot?.byWorkspace
   if (source === null || typeof source !== 'object') return []
   const rows: PanelWorkspaceRow[] = []
   for (const [id, raw] of Object.entries(source as Record<string, any>)) {
+    // 会话作用域下只保留本会话所属工作区，其余工作区一律不出现。
+    if (scopeId !== null && id !== scopeId) continue
     const bucket = raw !== null && typeof raw === 'object' ? raw : {}
     const savedHitTokens = num(bucket.moneyHitTokens)
     const savedMissTokens = num(bucket.moneyMissTokens)
@@ -266,7 +281,11 @@ function shareOf(saved: number, actual: number): number | null {
  * 逐轮 `removedPromptTokens` 的加法，`actualMoney` 是逐轮 `actualCost` 的加法。
  * 日志补齐的部分没有工作区归属，单独放进 `unattributed*`，不做任何按比例摊派。
  */
-function readDays(snapshot: any, todayKey: string): { today: PanelDay; days: PanelDay[] } {
+function readDays(
+  snapshot: any,
+  todayKey: string,
+  scopeId: string | null = null,
+): { today: PanelDay; days: PanelDay[] } {
   const byDate = new Map<string, PanelDay>()
   const dayOf = (date: string): PanelDay => {
     const existing = byDate.get(date)
@@ -276,7 +295,14 @@ function readDays(snapshot: any, todayKey: string): { today: PanelDay; days: Pan
     return created
   }
 
-  const globalDays = snapshot && typeof snapshot.byDay === 'object' && snapshot.byDay !== null ? snapshot.byDay : {}
+  // 限定工作区时，日总额改由该工作区自己的 byDay 求和；全局日账含「无法归属」的
+  // 历史轮次，混进来就不再是「只看这个工作区」了。
+  const globalDays =
+    scopeId !== null
+      ? {}
+      : snapshot && typeof snapshot.byDay === 'object' && snapshot.byDay !== null
+        ? snapshot.byDay
+        : {}
   for (const [date, bucket] of Object.entries(globalDays as Record<string, DayBucket>)) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue
     const day = dayOf(date)
@@ -290,6 +316,8 @@ function readDays(snapshot: any, todayKey: string): { today: PanelDay; days: Pan
   // 逐工作区归集；这些行一定也计入了全局日账，所以只用于「归属」，不再累加总额。
   const buckets = snapshot && typeof snapshot.byWorkspace === 'object' && snapshot.byWorkspace !== null ? snapshot.byWorkspace : {}
   for (const [id, bucket] of Object.entries(buckets as Record<string, any>)) {
+    // 限定工作区时必须过滤：否则「只看本工作区」会把别人的日账也加进来。
+    if (scopeId !== null && id !== scopeId) continue
     const perDay = bucket && typeof bucket.byDay === 'object' && bucket.byDay !== null ? bucket.byDay : {}
     for (const [date, dayBucket] of Object.entries(perDay as Record<string, DayBucket>)) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue
@@ -354,9 +382,14 @@ export function buildPanelSummary(input: {
   snapshot?: any
   bill?: any
   now?: number
+  /** 会话标签页传入；解析为该会话所属工作区，只返回那一份数据。 */
+  sessionId?: string | null
 }): PanelSummary {
   const snapshot = input.snapshot ?? null
-  const workspaces = readWorkspaces(snapshot)
+  const sessionId = typeof input.sessionId === 'string' && input.sessionId ? input.sessionId : null
+  const mapped = sessionId ? (snapshot?.bySession?.[sessionId] ?? null) : null
+  const scopeId = typeof mapped === 'string' && mapped ? mapped : null
+  const workspaces = readWorkspaces(snapshot, sessionId ? (scopeId ?? '__none__') : null)
 
   let savedHitTokens = 0
   let savedMissTokens = 0
@@ -375,7 +408,11 @@ export function buildPanelSummary(input: {
   const savedTokens = savedHitTokens + savedMissTokens
 
   const generatedAt = new Date(input.now ?? Date.now()).toISOString()
-  const dayView = readDays(snapshot, dayKeyOf(input.now ?? Date.now()))
+  const dayView = readDays(
+    snapshot,
+    dayKeyOf(input.now ?? Date.now()),
+    sessionId ? (scopeId ?? '__none__') : null,
+  )
   return {
     ok: true,
     schema: PANEL_SCHEMA_VERSION,
@@ -387,6 +424,13 @@ export function buildPanelSummary(input: {
     workspaces,
     today: dayView.today,
     days: dayView.days,
+    scope: {
+      sessionId,
+      workspaceId: scopeId,
+      workspaceLabel: scopeId !== null && workspaces.length > 0 ? workspaces[0].label : null,
+      resolved: scopeId !== null,
+      all: sessionId === null,
+    },
     process: readProcessBill(input.bill),
     formula: { ...FORMULA },
   }
@@ -415,7 +459,7 @@ export interface PanelRouteHost {
  */
 export function registerPanelRoute(
   host: PanelRouteHost,
-  read: () => PanelSummary,
+  read: (sessionId?: string | null) => PanelSummary,
   onError?: (message: string) => void,
   onMount?: (path: string) => void,
 ): () => void {
@@ -434,7 +478,20 @@ export function registerPanelRoute(
       path,
       methods: ['POST'],
       requestBody: 'buffered',
-      fetch: () => jsonResponse(read()),
+      /**
+       * 会话标签页会把 sessionId 放进 POST body；带 sessionId 时只返回该会话所属
+       * 工作区的数据（与 dsh-context 的 detail 路由同构），不带则返回全部工作区汇总。
+       */
+      fetch: async (request: any) => {
+        let sessionId: string | null = null
+        try {
+          const body = await request.json()
+          if (body !== null && typeof body === 'object' && typeof body.sessionId === 'string' && body.sessionId) {
+            sessionId = body.sessionId
+          }
+        } catch {}
+        return jsonResponse(read(sessionId))
+      },
     })
     onMount?.(path)
     if (typeof handle === 'function') {

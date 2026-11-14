@@ -113,6 +113,19 @@ export interface PanelSummary {
     today: PanelDay;
     /** 最近若干天的按日汇总，新→旧。 */
     days: PanelDay[];
+    /**
+     * 作用域。传了 sessionId（会话标签页）时只返回该会话所属工作区的数据；
+     * 未传（左侧栏独立页面）时返回全部工作区的汇总。
+     */
+    scope: {
+        sessionId: string | null;
+        workspaceId: string | null;
+        workspaceLabel: string | null;
+        /** true = 已解析到具体工作区。 */
+        resolved: boolean;
+        /** true = 未限定作用域，返回全部工作区。 */
+        all: boolean;
+    };
     /** 按工作区分账，金额降序；面板的每个标签页对应一行。 */
     workspaces: PanelWorkspaceRow[];
     /** 本进程 provider 实测账单；没有记录时为 null。 */
@@ -128,6 +141,8 @@ export declare function buildPanelSummary(input: {
     snapshot?: any;
     bill?: any;
     now?: number;
+    /** 会话标签页传入；解析为该会话所属工作区，只返回那一份数据。 */
+    sessionId?: string | null;
 }): PanelSummary;
 export interface PanelRouteHost {
     get?: (name: string) => any;
@@ -139,4 +154,4 @@ export interface PanelRouteHost {
  * 面板是可选功能：connection 服务不存在、或注册抛错，都只记一条日志，
  * 绝不影响压缩主链路（这里不抛异常）。
  */
-export declare function registerPanelRoute(host: PanelRouteHost, read: () => PanelSummary, onError?: (message: string) => void, onMount?: (path: string) => void): () => void;
+export declare function registerPanelRoute(host: PanelRouteHost, read: (sessionId?: string | null) => PanelSummary, onError?: (message: string) => void, onMount?: (path: string) => void): () => void;

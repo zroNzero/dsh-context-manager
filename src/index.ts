@@ -1640,7 +1640,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
    * 面板数据源：只读路由，数据来自已落盘的账本 + 本进程 provider 实测账单。
    * 任何一步失败都只是「面板没数据」，不影响压缩主链路。
    */
-  const readPanel = (): ReturnType<typeof buildPanelSummary> => {
+  const readPanel = (sessionId?: string | null): ReturnType<typeof buildPanelSummary> => {
     let snapshot: unknown = null
     let bill: unknown = null
     try {
@@ -1662,7 +1662,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     try {
       bill = billing.snapshot()
     } catch {}
-    return buildPanelSummary({ snapshot, bill })
+    return buildPanelSummary({ snapshot, bill, sessionId: sessionId ?? null })
   }
   // 无条件留痕：日志里出现这一行才说明跑的是「带面板的构建」。
   // 面板 404 时先看这里——没有 attempt 就不是路由问题，而是进程还在跑旧 dist。

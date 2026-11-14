@@ -54,7 +54,7 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------------
     // 取数：失败时保留上一次成功的数据，只把错误挂在标题栏
     // ---------------------------------------------------------------------
-    function useSummary() {
+    function useSummary(sessionId) {
       const [data, setData] = React.useState(null)
       const [error, setError] = React.useState('')
       const [loading, setLoading] = React.useState(true)
@@ -69,7 +69,7 @@ window.__ModuleLoader__.load({
             request = fetch(ROUTE, {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: '{}',
+              body: JSON.stringify(sessionId ? { sessionId: sessionId } : {}),
             })
           } catch (thrown) {
             if (alive) {
@@ -103,7 +103,7 @@ window.__ModuleLoader__.load({
           alive = false
           if (timer !== null) clearInterval(timer)
         }
-      }, [])
+      }, [sessionId])
 
       return { data: data, error: error, loading: loading }
     }
@@ -326,8 +326,9 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------------
     // 主面板：标签页 = 合计 + 每个工作区
     // ---------------------------------------------------------------------
-    function PanelPage() {
-      const state = useSummary()
+    function PanelPage(props) {
+      const sessionId = props && typeof props.sessionId === 'string' ? props.sessionId : null
+      const state = useSummary(sessionId)
       const [active, setActive] = React.useState('__all__')
       const [range, setRange] = React.useState('today')
       const data = state.data
