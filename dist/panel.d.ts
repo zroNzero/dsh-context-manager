@@ -98,4 +98,4 @@ export interface PanelRouteHost {
  * 面板是可选功能：connection 服务不存在、或注册抛错，都只记一条日志，
  * 绝不影响压缩主链路（这里不抛异常）。
  */
-export declare function registerPanelRoute(host: PanelRouteHost, read: () => PanelSummary, onError?: (message: string) => void): () => void;
+export declare function registerPanelRoute(host: PanelRouteHost, read: () => PanelSummary, onError?: (message: string) => void, onMount?: (path: string) => void): () => void;

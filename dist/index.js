@@ -1636,6 +1636,8 @@ function apply(ctx, rawConfig = {}) {
     };
     const panelDispose = (0, panel_1.registerPanelRoute)(services, readPanel, (message) => {
         (0, log_1.logEvent)('warn', 'panel.route.unavailable', { message });
+    }, (path) => {
+        (0, log_1.logEvent)('info', 'panel.route.ready', { route: path });
     });
     if (typeof panelDispose === 'function')
         disposers.push(panelDispose);

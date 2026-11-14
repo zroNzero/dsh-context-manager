@@ -1635,9 +1635,16 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
     } catch {}
     return buildPanelSummary({ snapshot, bill })
   }
-  const panelDispose = registerPanelRoute(services, readPanel, (message) => {
-    logEvent('warn', 'panel.route.unavailable', { message })
-  })
+  const panelDispose = registerPanelRoute(
+    services,
+    readPanel,
+    (message) => {
+      logEvent('warn', 'panel.route.unavailable', { message })
+    },
+    (path) => {
+      logEvent('info', 'panel.route.ready', { route: path })
+    },
+  )
   if (typeof panelDispose === 'function') disposers.push(panelDispose)
 
   logEvent('info', 'apply.ready', { plugin: name, mode: 'full', routing: router.circuitOpen ? 'open' : 'closed' })

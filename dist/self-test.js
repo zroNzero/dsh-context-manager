@@ -803,6 +803,59 @@ check('panel.money-is-recomputable', () => {
     const tokenSum = panel.workspaces.reduce((sum, row) => sum + row.savedOutTokens, 0);
     assert(tokenSum === panel.totals.savedOutTokens, 'workspace output tokens must sum to the total');
 });
+// ---------------------------------------------------------------------------
+// 29) 宿主按绝对路径匹配路由：注册时必须补前导斜杠，否则客户端只会拿到 404
+// ---------------------------------------------------------------------------
+check('panel.route-registers-absolute-path', () => {
+    const registered = [];
+    const fakeCtx = {
+        get(name) {
+            if (name !== 'connection')
+                return undefined;
+            return {
+                fetch: {
+                    register(options) {
+                        registered.push(options.path);
+                        return () => { };
+                    },
+                },
+            };
+        },
+    };
+    const dispose = (0, panel_1.registerPanelRoute)(fakeCtx, () => (0, panel_1.buildPanelSummary)({ snapshot: null, bill: null }), () => { });
+    assert(registered.length === 1, `route must be registered exactly once, got ${registered.length}`);
+    assert(registered[0] === '/api/dsh-context-manager/summary', `host path must be absolute; got ${JSON.stringify(registered[0])}`);
+    dispose();
+});
+// ---------------------------------------------------------------------------
+// 30) 真实 Cordis 的 ctx.inject(deps, cb) 把「携带这些 service 的 ctx」交给 cb，
+//     不是 service 本身。必须从 cb 的入参里取 connection，否则永远注册不上 → 404。
+// ---------------------------------------------------------------------------
+check('panel.route-survives-cordis-inject-carrier', () => {
+    const registered = [];
+    const connection = {
+        fetch: {
+            register(options) {
+                registered.push(options.path);
+                return () => { };
+            },
+        },
+    };
+    // 模拟 Cordis：外层 ctx 在连接就绪前拿不到 service，注入完成后交给回调的是一个
+    // 能 get 到 connection 的派生 ctx。
+    const carrier = { get: (name) => (name === 'connection' ? connection : undefined) };
+    const fakeCtx = {
+        get: () => undefined,
+        inject(_deps, cb) {
+            return cb(carrier);
+        },
+    };
+    const dispose = (0, panel_1.registerPanelRoute)(fakeCtx, () => (0, panel_1.buildPanelSummary)({ snapshot: null, bill: null }), () => { });
+    assert(registered.length === 1, `route must survive the inject carrier, got ${registered.length}`);
+    assert(registered[0] === '/api/dsh-context-manager/summary', `bad host path ${registered[0]}`);
+    assert(typeof dispose === 'function', 'registration must hand back a disposer');
+    dispose();
+});
 const failed = outcomes.filter((item) => !item.ok);
 for (const item of outcomes) {
     process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'} ${item.name} :: ${item.detail}\n`);

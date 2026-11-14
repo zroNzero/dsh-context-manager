@@ -426,7 +426,16 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       ctx.effect(injectCss, 'dsh-context-manager: styles')
 
-      // 左侧栏入口：点击由 shell 转成 selectPanel(id)，id 必须等于下面 main 的 key。
+      // 顺序很重要：先坐好 main 页面，再挂左侧栏条目——工具栏点击时目标 key 已存在，
+      // 不会出现「点了没反应」的空白帧（对照 dsh-context 的注册顺序）。
+      // 独立页面：main 是 keyed slot，只认 key（其它 key 不绑定会话）。
+      ctx.slots.inject('main', function () {
+        return ctx.slots.register({ name: 'main', key: PANEL_ID }, function () {
+          return h(PanelPage, {})
+        })
+      })
+
+      // 左侧栏入口：点击由 shell 转成 selectPanel(id)，id 必须等于上面 main 的 key。
       ctx.slots.inject('sidebar.panellist', function () {
         return ctx.slots.register(
           {
@@ -441,13 +450,6 @@ window.__ModuleLoader__.load({
             return h(PanelIcon, { size: props && props.size })
           },
         )
-      })
-
-      // 独立页面：main 是 keyed slot，只认 key（其它 key 不绑定会话）。
-      ctx.slots.inject('main', function () {
-        return ctx.slots.register({ name: 'main', key: PANEL_ID }, function () {
-          return h(PanelPage, {})
-        })
       })
     }
 

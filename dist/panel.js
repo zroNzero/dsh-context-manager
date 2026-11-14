@@ -157,7 +157,7 @@ function jsonResponse(body) {
  * 面板是可选功能：connection 服务不存在、或注册抛错，都只记一条日志，
  * 绝不影响压缩主链路（这里不抛异常）。
  */
-function registerPanelRoute(host, read, onError) {
+function registerPanelRoute(host, read, onError, onMount) {
     let dispose = null;
     const mount = (connection) => {
         const registry = connection?.fetch;
@@ -165,12 +165,16 @@ function registerPanelRoute(host, read, onError) {
             onError?.('connection.fetch.register 不可用');
             return () => { };
         }
+        const path = exports.PANEL_ROUTE.startsWith('/') ? exports.PANEL_ROUTE : `/${exports.PANEL_ROUTE}`;
         const handle = registry.register({
-            path: exports.PANEL_ROUTE,
+            // 宿主按绝对路径匹配：必须带前导斜杠（对照 dsh-context 的 '/api/dsh-context/detail'）。
+            // 客户端用相对地址 fetch('api/...')，由浏览器补成同源绝对路径。
+            path,
             methods: ['POST'],
             requestBody: 'buffered',
             fetch: () => jsonResponse(read()),
         });
+        onMount?.(path);
         if (typeof handle === 'function')
             return handle;
         return () => {
@@ -180,6 +184,10 @@ function registerPanelRoute(host, read, onError) {
             catch { }
         };
     };
+    /** ctx.inject 的回调收到的是「带该服务的 context」，不是服务本身，必须再取一次。 */
+    const serviceOf = (carrier) => carrier !== null && carrier !== undefined && typeof carrier.get === 'function'
+        ? carrier.get('connection')
+        : carrier;
     try {
         const existing = typeof host.get === 'function' ? host.get('connection') : undefined;
         if (existing !== null && existing !== undefined) {
@@ -187,8 +195,8 @@ function registerPanelRoute(host, read, onError) {
             return () => dispose?.();
         }
         if (typeof host.inject === 'function') {
-            host.inject(['connection'], (connection) => {
-                dispose = mount(connection);
+            host.inject(['connection'], (carrier) => {
+                dispose = mount(serviceOf(carrier));
             });
             return () => dispose?.();
         }

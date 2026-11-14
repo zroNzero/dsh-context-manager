@@ -244,6 +244,7 @@ export function registerPanelRoute(
   host: PanelRouteHost,
   read: () => PanelSummary,
   onError?: (message: string) => void,
+  onMount?: (path: string) => void,
 ): () => void {
   let dispose: (() => void) | null = null
 
@@ -253,12 +254,16 @@ export function registerPanelRoute(
       onError?.('connection.fetch.register 不可用')
       return () => {}
     }
+    const path = PANEL_ROUTE.startsWith('/') ? PANEL_ROUTE : `/${PANEL_ROUTE}`
     const handle = registry.register({
-      path: PANEL_ROUTE,
+      // 宿主按绝对路径匹配：必须带前导斜杠（对照 dsh-context 的 '/api/dsh-context/detail'）。
+      // 客户端用相对地址 fetch('api/...')，由浏览器补成同源绝对路径。
+      path,
       methods: ['POST'],
       requestBody: 'buffered',
       fetch: () => jsonResponse(read()),
     })
+    onMount?.(path)
     if (typeof handle === 'function') return handle as () => void
     return () => {
       try {
@@ -267,6 +272,12 @@ export function registerPanelRoute(
     }
   }
 
+  /** ctx.inject 的回调收到的是「带该服务的 context」，不是服务本身，必须再取一次。 */
+  const serviceOf = (carrier: any): any =>
+    carrier !== null && carrier !== undefined && typeof carrier.get === 'function'
+      ? carrier.get('connection')
+      : carrier
+
   try {
     const existing = typeof host.get === 'function' ? host.get('connection') : undefined
     if (existing !== null && existing !== undefined) {
@@ -274,8 +285,8 @@ export function registerPanelRoute(
       return () => dispose?.()
     }
     if (typeof host.inject === 'function') {
-      host.inject(['connection'], (connection: any) => {
-        dispose = mount(connection)
+      host.inject(['connection'], (carrier: any) => {
+        dispose = mount(serviceOf(carrier))
       })
       return () => dispose?.()
     }
