@@ -1,0 +1,5 @@
+# Bundle patch：这一行把本包的主入口作为 host 半加载（普通 Cordis 插件）；
+# package.json 里的 `dsh.client` 声明让 web 端再加载 ./client 作为浏览器半。
+- insert:
+    - id: my-plugin
+      name: my-plugin

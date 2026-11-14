@@ -1,0 +1,41 @@
+{
+  "name": "my-plugin",
+  "version": "0.1.0",
+  "description": "DSH panel plugin skeleton: sidebar entry + standalone page + optional conversation tab",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "client.js",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "node tools/check-slots.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

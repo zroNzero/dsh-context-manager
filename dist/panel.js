@@ -141,7 +141,7 @@ function emptyDay(date) {
         workspaces: [],
         unattributedTokens: 0,
         unattributedMoney: 0,
-        unattributed: { tokens: 0, money: 0, turns: 0 },
+        unattributed: { tokens: 0, money: 0, turns: 0, savedOutTokens: 0, actualMoney: 0 },
         totals: { savedTokens: 0, savedOutTokens: 0, savedMoney: 0, actualMoney: 0, savedShare: null, turns: 0 },
     };
 }
@@ -218,10 +218,14 @@ function readDays(snapshot, todayKey) {
         day.unattributedTokens = Math.max(0, day.savedTokens - attributedTokens);
         day.unattributedMoney = Math.max(0, Math.round((day.savedMoney - attributedMoney) * 1e6) / 1e6);
         const attributedTurns = day.workspaces.reduce((sum, row) => sum + row.turns, 0);
+        const attributedActual = day.workspaces.reduce((sum, row) => sum + row.actualMoney, 0);
+        const attributedOut = day.workspaces.reduce((sum, row) => sum + row.savedOutTokens, 0);
         day.unattributed = {
             tokens: day.unattributedTokens,
             money: day.unattributedMoney,
             turns: Math.max(0, day.turns - attributedTurns),
+            savedOutTokens: Math.max(0, day.savedOutTokens - attributedOut),
+            actualMoney: Math.max(0, Math.round((day.actualMoney - attributedActual) * 1e6) / 1e6),
         };
         day.totals = {
             savedTokens: day.savedTokens,

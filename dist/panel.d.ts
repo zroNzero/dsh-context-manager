@@ -77,6 +77,8 @@ export interface PanelDay {
         tokens: number;
         money: number;
         turns: number;
+        savedOutTokens: number;
+        actualMoney: number;
     };
     /** 当日合计，字段与工作区行一致，便于 UI 用同一条渲染路径。 */
     totals: {
