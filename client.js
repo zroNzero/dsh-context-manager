@@ -401,7 +401,11 @@ window.__ModuleLoader__.load({
           ),
         ),
 
-        h(
+        // 只有一个工作区时，下面的明细已经把同样的三个数（外加实花与占比）列全了，
+        // 再放一行 hero 就是同一组数字出现两遍。0 个工作区时 hero 是唯一汇总，保留。
+        workspaces.length === 1
+          ? null
+          : h(
           'div',
           { className: 'dcm-grid dcm-grid-hero' },
           h(StatCard, {
@@ -423,7 +427,11 @@ window.__ModuleLoader__.load({
 
         h(RangeSwitch, { range: range, onSelect: setRange }),
 
-        h(TabBar, { tabs: tabs, active: active, onSelect: setActive }),
+        // 只有一个工作区时，「合计」与它必然同值，标签栏纯属噪声，直接不渲染
+        // （会话标签页被限定到单一工作区时就走这条路径）。
+        workspaces.length > 1
+          ? h(TabBar, { tabs: tabs, active: active, onSelect: setActive })
+          : null,
 
         range === 'today'
           ? h(DayDetail, { day: today, workspaceId: active === '__all__' ? null : active })
