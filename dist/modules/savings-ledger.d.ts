@@ -134,7 +134,7 @@ export declare class SavingsLedger {
     private aggFor;
     record(module: SavingsModule, tokens: number, detail?: string, workspace?: WorkspaceRef, beforeTokens?: number): void;
     /** 记录一次请求的 prompt token（压缩前/后）；只计统计，不产生“节省事件”。 */
-    recordRequestTokens(workspace: WorkspaceRef | undefined, beforeTokens: number, afterTokens: number): void;
+    recordRequestTokens(workspace: WorkspaceRef | undefined, beforeTokens: number, afterTokens: number, sessionId?: string): void;
     /**
      * 记录一轮 LLM 调用的金额。
      *

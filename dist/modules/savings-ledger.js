@@ -87,15 +87,19 @@ class SavingsLedger {
             this.lastEvents.shift();
     }
     /** 记录一次请求的 prompt token（压缩前/后）；只计统计，不产生“节省事件”。 */
-    recordRequestTokens(workspace, beforeTokens, afterTokens) {
+    recordRequestTokens(workspace, beforeTokens, afterTokens, sessionId) {
         const before = Math.max(0, Math.round(beforeTokens));
         const after = Math.max(0, Math.min(before, Math.round(afterTokens)));
         if (before <= 0 && after <= 0)
             return;
-        const agg = this.aggFor(workspace ?? UNKNOWN_WORKSPACE);
+        const ref = workspace ?? UNKNOWN_WORKSPACE;
+        const agg = this.aggFor(ref);
         agg.tokensBefore += before;
         agg.tokensAfter += after;
         agg.updatedAt = Date.now();
+        // 每个请求都带 sessionId：在这里补登记，保证面板永远能把会话定位到工作区。
+        if (sessionId)
+            this.bySession.set(sessionId, ref.id);
         this.revision += 1;
         this.updatedAt = Date.now();
     }

@@ -4,23 +4,40 @@
   "description": "dsh-context-manager (CostKillerOrchestrator): cache-aligned context governance for DSH (Admission / Extraction / Memory / CacheAnchor / Routing / SchemaIndex / DedupBus)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./panels": "./panels/plugin.js",
+    "./client": "./client.js"
+  },
   "files": [
     "dist",
+    "panels",
+    "assets",
+    "client.js",
     "cordis.patch.yml"
   ],
   "scripts": {
     "build": "tsc",
     "test": "tsc && node dist/self-test.js",
     "verify": "tsc && node dist/verify.js",
-    "demo": "tsc && node dist/demo.js"
+    "demo": "tsc && node dist/demo.js",
+    "test:panels": "node --test \"test/panels/*.test.mjs\""
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
     }
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "jsdom": "^31.0.1",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
