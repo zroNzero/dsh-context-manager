@@ -1639,16 +1639,6 @@ function apply(ctx, rawConfig = {}) {
     });
     if (typeof panelDispose === 'function')
         disposers.push(panelDispose);
-    const panelDisposer = (0, panel_1.registerPanelRoute)(services, () => {
-        let snapshot = null;
-        try {
-            snapshot = ledger.snapshot();
-        }
-        catch { }
-        return (0, panel_1.buildPanelSummary)({ snapshot });
-    }, (message) => (0, log_1.logEvent)('warn', 'panel.route.unavailable', { message }));
-    if (typeof panelDisposer === 'function')
-        disposers.push(panelDisposer);
     (0, log_1.logEvent)('info', 'apply.ready', { plugin: exports.name, mode: 'full', routing: router.circuitOpen ? 'open' : 'closed' });
     return () => {
         (0, log_1.logEvent)('info', 'apply.dispose', { plugin: exports.name });
