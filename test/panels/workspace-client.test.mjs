@@ -111,16 +111,16 @@ test('registers a view tab, a sidebar row and a workspace page when enabled', as
   assert.deepEqual(names, ['conversation.view', 'main', 'sidebar.panellist'])
 
   const view = registrations.find((r) => r.options.name === 'conversation.view').options
-  assert.equal(view.id, 'whale-savings')
+  assert.equal(view.id, 'savings')
   assert.equal(view.order, 20, 'must sort after Trajectory (order 10)')
   assert.equal(view.label(), '节省')
 
   const sidebar = registrations.find((r) => r.options.name === 'sidebar.panellist').options
-  assert.equal(sidebar.id, 'whale-savings')
+  assert.equal(sidebar.id, 'savings')
   assert.equal(sidebar.label(), '节省')
 
   const main = registrations.find((r) => r.options.name === 'main').options
-  assert.equal(main.key, 'whale-savings', 'the sidebar row selects this keyed page')
+  assert.equal(main.key, 'savings', 'the sidebar row selects this keyed page')
 })
 
 test('registers nothing when the panel flag is off (snapshot route 404s)', async () => {

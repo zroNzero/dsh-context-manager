@@ -1,4 +1,4 @@
-/*
+﻿/*
  * dsh-context-manager — 节省面板（client plugin）。
  *
  * Registers three things, all reading the same snapshot endpoint:
@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const useEffect = React.useEffect
     const useState = React.useState
 
-    const NS = 'whale-savings'
+    const NS = 'savings'
     const SNAPSHOT_URL = '/dsh-savings/panels.json'
     const PANEL_ID = 'token-savings'
     const POLL_MS = 5000
