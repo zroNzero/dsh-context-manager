@@ -32,7 +32,7 @@ export interface PanelWorkspaceRow {
   /** 逐轮累计的真实花费（CNY），与 savedMoney 同源同口径。 */
   actualMoney: number
   /** savedMoney / (savedMoney + actualMoney)，0–1。 */
-  savedShare: number
+  savedShare: number | null
   turns: number
   /** 省下的 token 里命中缓存的比例；越高说明省的越「便宜」。 */
   cachedShare: number
@@ -67,7 +67,7 @@ export interface PanelSummary {
     savedOutTokens: number
     savedMoney: number
     actualMoney: number
-    savedShare: number
+    savedShare: number | null | null
     turns: number
     cachedShare: number
   }
@@ -141,7 +141,7 @@ function readWorkspaces(snapshot: any): PanelWorkspaceRow[] {
       savedMoney,
       actualMoney,
       /** 省下占「省下 + 实花」的比例；两个加数都是逐轮实测累加，没有估算项。 */
-      savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : 0,
+      savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : null,
       turns: num(bucket.moneyTurns),
       cachedShare: ratio(savedHitTokens, savedTokens),
     })
@@ -212,7 +212,7 @@ export function buildPanelSummary(input: {
     generatedAt,
     since: str(snapshot?.startedAt) || null,
     currency: 'CNY',
-    totals: { savedTokens, savedHitTokens, savedMissTokens, savedOutTokens, savedMoney, actualMoney, savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : 0, turns, cachedShare: ratio(savedHitTokens, savedTokens) },
+    totals: { savedTokens, savedHitTokens, savedMissTokens, savedOutTokens, savedMoney, actualMoney, savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : null, turns, cachedShare: ratio(savedHitTokens, savedTokens) },
     workspaces,
     process: readProcessBill(input.bill),
     formula: { ...FORMULA },

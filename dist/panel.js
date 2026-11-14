@@ -71,7 +71,7 @@ function readWorkspaces(snapshot) {
             savedMoney,
             actualMoney,
             /** 省下占「省下 + 实花」的比例；两个加数都是逐轮实测累加，没有估算项。 */
-            savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : 0,
+            savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : null,
             turns: num(bucket.moneyTurns),
             cachedShare: ratio(savedHitTokens, savedTokens),
         });
@@ -136,7 +136,7 @@ function buildPanelSummary(input) {
         generatedAt,
         since: str(snapshot?.startedAt) || null,
         currency: 'CNY',
-        totals: { savedTokens, savedHitTokens, savedMissTokens, savedOutTokens, savedMoney, actualMoney, savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : 0, turns, cachedShare: ratio(savedHitTokens, savedTokens) },
+        totals: { savedTokens, savedHitTokens, savedMissTokens, savedOutTokens, savedMoney, actualMoney, savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : null, turns, cachedShare: ratio(savedHitTokens, savedTokens) },
         workspaces,
         process: readProcessBill(input.bill),
         formula: { ...FORMULA },

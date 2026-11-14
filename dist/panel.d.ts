@@ -29,7 +29,7 @@ export interface PanelWorkspaceRow {
     /** 逐轮累计的真实花费（CNY），与 savedMoney 同源同口径。 */
     actualMoney: number;
     /** savedMoney / (savedMoney + actualMoney)，0–1。 */
-    savedShare: number;
+    savedShare: number | null;
     turns: number;
     /** 省下的 token 里命中缓存的比例；越高说明省的越「便宜」。 */
     cachedShare: number;
@@ -62,7 +62,7 @@ export interface PanelSummary {
         savedOutTokens: number;
         savedMoney: number;
         actualMoney: number;
-        savedShare: number;
+        savedShare: number | null | null;
         turns: number;
         cachedShare: number;
     };
