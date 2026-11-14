@@ -18,6 +18,7 @@ exports.buildPanelSummary = buildPanelSummary;
 exports.registerPanelRoute = registerPanelRoute;
 /** provider 账单的口径版本；与 savings-ledger 的 ACCOUNTING_VERSION 同步演进。 */
 exports.PANEL_SCHEMA_VERSION = 1;
+const day_ledger_1 = require("./modules/day-ledger");
 exports.PANEL_ROUTE = 'api/dsh-context-manager/summary';
 /** 单价表（元 / 百万 token）。低峰价；高峰翻倍由调用方在 usage 侧体现。 */
 const PRICE = { miss: 1, hit: 0.02, output: 4 };
@@ -80,6 +81,22 @@ function readWorkspaces(snapshot) {
     rows.sort((left, right) => right.savedMoney - left.savedMoney || left.id.localeCompare(right.id));
     return rows;
 }
+/** 一天的账：来源只有账本自己落的 byDay，不做任何按比例摊派。 */
+function readDayBucket(raw) {
+    const bucket = raw !== null && typeof raw === 'object' ? raw : {};
+    const savedTokens = num(bucket.savedTokens);
+    const savedOutTokens = num(bucket.savedOutTokens);
+    const savedMoney = num(bucket.savedMoney);
+    const actualMoney = num(bucket.actualMoney);
+    return {
+        savedTokens,
+        savedOutTokens,
+        savedMoney,
+        actualMoney,
+        savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : null,
+        turns: num(bucket.turns),
+    };
+}
 function readProcessBill(bill) {
     if (bill === null || typeof bill !== 'object')
         return null;
@@ -110,6 +127,114 @@ function readProcessBill(bill) {
  * 入参是**已经算好的**账本快照和账单快照（依赖由调用方注入，方便离线单测）。
  * 未知字段一律降级成 0 / 空数组，绝不让面板因为字段缺失而白屏。
  */
+/** 面板只展示最近两周，避免 payload 随账本无限增长。 */
+const DAY_HISTORY_LIMIT = 14;
+function emptyDay(date) {
+    return {
+        date,
+        savedTokens: 0,
+        savedOutTokens: 0,
+        savedMoney: 0,
+        actualMoney: 0,
+        savedShare: null,
+        turns: 0,
+        workspaces: [],
+        unattributedTokens: 0,
+        unattributedMoney: 0,
+        unattributed: { tokens: 0, money: 0, turns: 0 },
+        totals: { savedTokens: 0, savedOutTokens: 0, savedMoney: 0, actualMoney: 0, savedShare: null, turns: 0 },
+    };
+}
+function shareOf(saved, actual) {
+    const total = saved + actual;
+    return total > 0 && Number.isFinite(total) ? saved / total : null;
+}
+/**
+ * 按本地日期读日账。
+ *
+ * 口径与累计口径完全一致：`savedMoney` 是逐轮 `savedCost` 的加法，`savedTokens` 是
+ * 逐轮 `removedPromptTokens` 的加法，`actualMoney` 是逐轮 `actualCost` 的加法。
+ * 日志补齐的部分没有工作区归属，单独放进 `unattributed*`，不做任何按比例摊派。
+ */
+function readDays(snapshot, todayKey) {
+    const byDate = new Map();
+    const dayOf = (date) => {
+        const existing = byDate.get(date);
+        if (existing)
+            return existing;
+        const created = emptyDay(date);
+        byDate.set(date, created);
+        return created;
+    };
+    const globalDays = snapshot && typeof snapshot.byDay === 'object' && snapshot.byDay !== null ? snapshot.byDay : {};
+    for (const [date, bucket] of Object.entries(globalDays)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
+            continue;
+        const day = dayOf(date);
+        day.savedTokens = num(bucket.savedTokens);
+        day.savedOutTokens = num(bucket.savedOutTokens);
+        day.savedMoney = num(bucket.savedMoney);
+        day.actualMoney = num(bucket.actualMoney);
+        day.turns = num(bucket.turns);
+    }
+    // 逐工作区归集；这些行一定也计入了全局日账，所以只用于「归属」，不再累加总额。
+    const buckets = snapshot && typeof snapshot.byWorkspace === 'object' && snapshot.byWorkspace !== null ? snapshot.byWorkspace : {};
+    for (const [id, bucket] of Object.entries(buckets)) {
+        const perDay = bucket && typeof bucket.byDay === 'object' && bucket.byDay !== null ? bucket.byDay : {};
+        for (const [date, dayBucket] of Object.entries(perDay)) {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
+                continue;
+            const day = dayOf(date);
+            const savedTokens = num(dayBucket.savedTokens);
+            const savedMoney = num(dayBucket.savedMoney);
+            if (savedTokens <= 0 && savedMoney <= 0)
+                continue;
+            day.workspaces.push({
+                id: String(id),
+                label: typeof bucket.label === 'string' && bucket.label ? bucket.label : String(id),
+                path: typeof bucket.workspace === 'string' ? bucket.workspace : '',
+                savedTokens,
+                savedOutTokens: num(dayBucket.savedOutTokens),
+                savedMoney,
+                actualMoney: num(dayBucket.actualMoney),
+                savedShare: shareOf(savedMoney, num(dayBucket.actualMoney)),
+                turns: num(dayBucket.turns),
+            });
+            // 只有全局日账缺失时（旧账本），才用工作区之和兜底，保证不出现「有明细没总额」。
+            if (!(date in globalDays)) {
+                day.savedTokens += savedTokens;
+                day.savedOutTokens += num(dayBucket.savedOutTokens);
+                day.savedMoney += savedMoney;
+                day.actualMoney += num(dayBucket.actualMoney);
+                day.turns += num(dayBucket.turns);
+            }
+        }
+    }
+    for (const day of byDate.values()) {
+        day.savedShare = shareOf(day.savedMoney, day.actualMoney);
+        day.workspaces.sort((left, right) => right.savedMoney - left.savedMoney || left.label.localeCompare(right.label));
+        const attributedTokens = day.workspaces.reduce((sum, row) => sum + row.savedTokens, 0);
+        const attributedMoney = day.workspaces.reduce((sum, row) => sum + row.savedMoney, 0);
+        day.unattributedTokens = Math.max(0, day.savedTokens - attributedTokens);
+        day.unattributedMoney = Math.max(0, Math.round((day.savedMoney - attributedMoney) * 1e6) / 1e6);
+        const attributedTurns = day.workspaces.reduce((sum, row) => sum + row.turns, 0);
+        day.unattributed = {
+            tokens: day.unattributedTokens,
+            money: day.unattributedMoney,
+            turns: Math.max(0, day.turns - attributedTurns),
+        };
+        day.totals = {
+            savedTokens: day.savedTokens,
+            savedOutTokens: day.savedOutTokens,
+            savedMoney: day.savedMoney,
+            actualMoney: day.actualMoney,
+            savedShare: day.savedShare,
+            turns: day.turns,
+        };
+    }
+    const days = [...byDate.values()].sort((left, right) => right.date.localeCompare(left.date)).slice(0, DAY_HISTORY_LIMIT);
+    return { today: byDate.get(todayKey) ?? emptyDay(todayKey), days };
+}
 function buildPanelSummary(input) {
     const snapshot = input.snapshot ?? null;
     const workspaces = readWorkspaces(snapshot);
@@ -129,6 +254,7 @@ function buildPanelSummary(input) {
     }
     const savedTokens = savedHitTokens + savedMissTokens;
     const generatedAt = new Date(input.now ?? Date.now()).toISOString();
+    const dayView = readDays(snapshot, (0, day_ledger_1.dayKeyOf)(input.now ?? Date.now()));
     return {
         ok: true,
         schema: exports.PANEL_SCHEMA_VERSION,
@@ -138,6 +264,8 @@ function buildPanelSummary(input) {
         currency: 'CNY',
         totals: { savedTokens, savedHitTokens, savedMissTokens, savedOutTokens, savedMoney, actualMoney, savedShare: actualMoney > 0 ? ratio(savedMoney, savedMoney + actualMoney) : null, turns, cachedShare: ratio(savedHitTokens, savedTokens) },
         workspaces,
+        today: dayView.today,
+        days: dayView.days,
         process: readProcessBill(input.bill),
         formula: { ...FORMULA },
     };

@@ -47,6 +47,47 @@ export interface PanelProcessBill {
     removedTokens: number;
     promptTokens: number;
 }
+export interface PanelDayRow {
+    id: string;
+    label: string;
+    path: string;
+    savedTokens: number;
+    savedOutTokens: number;
+    savedMoney: number;
+    actualMoney: number;
+    savedShare: number | null;
+    turns: number;
+}
+export interface PanelDay {
+    /** 本地日期 YYYY-MM-DD。 */
+    date: string;
+    savedTokens: number;
+    savedOutTokens: number;
+    savedMoney: number;
+    actualMoney: number;
+    savedShare: number | null;
+    turns: number;
+    /** 按工作区拆分的当日数据；日志补齐的部分没有归属，不在其中。 */
+    workspaces: PanelDayRow[];
+    /** 无法归属到工作区的当日省下 token / 金额（来自日志补齐），显式暴露而不是摊派。 */
+    unattributedTokens: number;
+    unattributedMoney: number;
+    /** 上面两项 + 轮次的合并形式，供 UI 直接消费。 */
+    unattributed: {
+        tokens: number;
+        money: number;
+        turns: number;
+    };
+    /** 当日合计，字段与工作区行一致，便于 UI 用同一条渲染路径。 */
+    totals: {
+        savedTokens: number;
+        savedOutTokens: number;
+        savedMoney: number;
+        actualMoney: number;
+        savedShare: number | null;
+        turns: number;
+    };
+}
 export interface PanelSummary {
     ok: true;
     schema: number;
@@ -62,10 +103,14 @@ export interface PanelSummary {
         savedOutTokens: number;
         savedMoney: number;
         actualMoney: number;
-        savedShare: number | null | null;
+        savedShare: number | null;
         turns: number;
         cachedShare: number;
     };
+    /** 当日（本地时区）汇总；字段口径与 totals 一致，只是范围限定在今天。 */
+    today: PanelDay;
+    /** 最近若干天的按日汇总，新→旧。 */
+    days: PanelDay[];
     /** 按工作区分账，金额降序；面板的每个标签页对应一行。 */
     workspaces: PanelWorkspaceRow[];
     /** 本进程 provider 实测账单；没有记录时为 null。 */
@@ -77,12 +122,6 @@ export interface PanelSummary {
         note: string;
     };
 }
-/**
- * 组装面板 payload。
- *
- * 入参是**已经算好的**账本快照和账单快照（依赖由调用方注入，方便离线单测）。
- * 未知字段一律降级成 0 / 空数组，绝不让面板因为字段缺失而白屏。
- */
 export declare function buildPanelSummary(input: {
     snapshot?: any;
     bill?: any;

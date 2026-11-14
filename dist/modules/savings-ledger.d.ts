@@ -12,6 +12,7 @@
  * 顶层字段始终等于各工作区之和；旧字段全部保留。
  */
 import { type WorkspaceRef } from './workspace';
+import { type DayBucket } from './day-ledger';
 export type SavingsModule = 'admission' | 'extraction' | 'dedup' | 'fold' | 'schema' | 'rewrite';
 export interface SavingsEvent {
     ts: string;
@@ -44,6 +45,10 @@ export interface WorkspaceSavingsSnapshot {
     moneyMissTokens?: number;
     /** 该工作区逐轮累计的「省下的输出 token」；与上面两项一起才能完整重建金额。 */
     moneyOutTokens?: number;
+    /** 该工作区逐轮累计的真实花费（CNY）。 */
+    moneyActualCny?: number;
+    /** 该工作区按本地日期分账。 */
+    byDay?: Record<string, DayBucket>;
     tokensBeforeTotal: number;
     tokensAfterTotal: number;
     updatedAt: string;
@@ -80,6 +85,8 @@ export interface SavingsSnapshot {
     byWorkspace: Record<string, WorkspaceSavingsSnapshot>;
     /** 会话 → 工作区 id，供客户端按会话定位自己的工作区（无需解析路径）。 */
     bySession: Record<string, string>;
+    /** 全局按日分账（日期新→旧）；含从日志补齐、无工作区归属的部分。 */
+    byDay: Record<string, DayBucket>;
     /**
      * 金额（CNY）：逐轮累加，每轮用该轮实测命中率与峰谷价单独计价。
      * 不做「先汇总 token 再乘平均单价」，因为命中率与峰谷价都不是线性的。
@@ -121,6 +128,8 @@ export interface TurnMoneyInput {
     savedOutTokens?: number;
     /** 该轮真实花费（CNY）；用于算「省下 / (省下 + 实花)」这个可审计的百分比。 */
     actualCny?: number;
+    /** 归属日期（本地 `YYYY-MM-DD`）；缺省由 `dayKeyOf()` 取当前时刻。 */
+    dayKey?: string;
     /** 该轮实测命中率（hitTokens / promptTokens）。 */
     hitRate: number;
     /** 该轮所处的计价时段，便于面板解释峰谷差异。 */
@@ -134,6 +143,8 @@ export declare class SavingsLedger {
     private readonly workspaces;
     private readonly bySession;
     private readonly lastEvents;
+    /** 全局按日分账（含从日志补齐、无工作区归属的部分）；各工作区的 byDay 是其子集。 */
+    private readonly days;
     private rejected;
     /** 记录会话归属，便于消费方按 sessionId 找到对应工作区。 */
     recordSession(sessionId: string, ref: WorkspaceRef): void;
@@ -151,6 +162,14 @@ export declare class SavingsLedger {
     noteFold(workspace?: WorkspaceRef): void;
     noteRejected(): void;
     private totalSaved;
+    /**
+     * 用 `billing.recorded` 日志补齐「尚无记录」的日期（重启后当日数据不中断）。
+     *
+     * 只补**缺失**的日期（`mergeMissingDays`），绝不会与实时记账重叠。
+     * 工作区维度只认日志行里自带的 `workspace` 字段：早期日志没有这个字段，
+     * 那部分老实计入「未归属」，绝不按比例摊派——摊派就是估算。
+     */
+    seedDaysFromLog(text: string): number;
     /** 从上次运行的 savings.json 恢复累计（同一工作区跨重启延续，不再每次归零）。 */
     restore(snapshot: any): boolean;
     private sumMoney;

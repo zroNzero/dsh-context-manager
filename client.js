@@ -146,6 +146,89 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function RangeSwitch(props) {
+      const options = [
+        { id: 'today', label: '当日' },
+        { id: 'all', label: '累计' },
+      ]
+      return h(
+        'div',
+        { className: 'dcm-range', role: 'tablist' },
+        options.map(function (option) {
+          const active = option.id === props.range
+          return h(
+            'button',
+            {
+              key: option.id,
+              type: 'button',
+              role: 'tab',
+              'aria-selected': active,
+              className: 'dcm-range-btn' + (active ? ' dcm-range-btn-active' : ''),
+              onClick: function () {
+                props.onSelect(option.id)
+              },
+            },
+            option.label,
+          )
+        }),
+      )
+    }
+
+    function DayDetail(props) {
+      const day = props.day
+      if (day === null || day === undefined) {
+        return h('div', { className: 'dcm-empty' }, '当日还没有实测数据。')
+      }
+      const rows = Array.isArray(day.workspaces) ? day.workspaces : []
+      const shown = props.workspaceId
+        ? rows.filter(function (row) {
+            return row.id === props.workspaceId
+          })[0] || null
+        : null
+      const target = props.workspaceId ? shown : day.totals
+      return h(
+        'div',
+        { className: 'dcm-detail' },
+        h('div', { className: 'dcm-detail-path' }, day.date + (props.workspaceId ? ' · ' + (shown ? shown.label : '该工作区') : ' · 全部工作区')),
+        h(
+          'div',
+          { className: 'dcm-grid' },
+          h(StatCard, {
+            label: '当日省下 token',
+            value: fmtTokens(target ? target.savedTokens : 0),
+            hint: '含省下的输出 ' + fmtTokens(target ? target.savedOutTokens : 0),
+          }),
+          h(StatCard, {
+            label: '当日省下',
+            value: fmtMoney(target ? target.savedMoney : 0),
+            hint: '逐请求累加，非按比例折算',
+          }),
+          h(StatCard, {
+            label: '当日实花',
+            value: fmtMoney(target ? target.actualMoney : 0),
+            hint: '省下占应发 ' + pct(target ? target.savedShare : null),
+          }),
+          h(StatCard, {
+            label: '当日轮次',
+            value: fmtTokens(target ? target.turns : 0),
+            hint: 'provider usage 实测',
+          }),
+        ),
+        !props.workspaceId && day.unattributed && day.unattributed.turns > 0
+          ? h(
+              'div',
+              { className: 'dcm-note' },
+              '其中 ' + fmtMoney(day.unattributed.money) + '（' + fmtTokens(day.unattributed.turns) + ' 轮）来自启动前的日志补齐，无法归属到具体工作区，故只计入当日合计。',
+            )
+          : null,
+        h(
+          'div',
+          { className: 'dcm-note' },
+          '当日口径：按本地日期归集逐轮实测值；跨天不重算、不估算。',
+        ),
+      )
+    }
+
     function WorkspaceDetail(props) {
       const row = props.row
       if (row === null || row === undefined) {
@@ -246,10 +329,14 @@ window.__ModuleLoader__.load({
     function PanelPage() {
       const state = useSummary()
       const [active, setActive] = React.useState('__all__')
+      const [range, setRange] = React.useState('today')
       const data = state.data
 
       const workspaces = data && Array.isArray(data.workspaces) ? data.workspaces : []
       const totals = data && data.totals ? data.totals : null
+      const today = data && data.today ? data.today : null
+      const todayRows = today && Array.isArray(today.workspaces) ? today.workspaces : []
+      const hero = range === 'today' && today ? today.totals : totals
 
       // 工作区可能消失（账本重写），选中的标签页要跟着回落，避免空白。
       React.useEffect(
@@ -267,11 +354,15 @@ window.__ModuleLoader__.load({
         {
           id: '__all__',
           label: '合计',
-          money: totals ? fmtMoney(totals.savedMoney) : '—',
+          money: fmtMoney(hero ? hero.savedMoney : 0),
         },
       ].concat(
         workspaces.map(function (row) {
-          return { id: row.id, label: row.label, money: fmtMoney(row.savedMoney) }
+          const dayRow = todayRows.filter(function (item) {
+            return item.id === row.id
+          })[0]
+          const source = range === 'today' ? dayRow : row
+          return { id: row.id, label: row.label, money: fmtMoney(source ? source.savedMoney : 0) }
         }),
       )
 
@@ -313,25 +404,29 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'dcm-grid dcm-grid-hero' },
           h(StatCard, {
-            label: '省下 token',
-            value: fmtTokens(totals ? totals.savedTokens : 0),
-            hint: '命中 ' + fmtTokens(totals ? totals.savedHitTokens : 0) + ' / 未命中 ' + fmtTokens(totals ? totals.savedMissTokens : 0),
+            label: range === 'today' ? '当日省下 token' : '省下 token',
+            value: fmtTokens(hero ? hero.savedTokens : 0),
+            hint: range === 'today' ? '按本地日期归集' : '命中 ' + fmtTokens(totals ? totals.savedHitTokens : 0) + ' / 未命中 ' + fmtTokens(totals ? totals.savedMissTokens : 0),
           }),
           h(StatCard, {
-            label: '折算省下',
-            value: fmtMoney(totals ? totals.savedMoney : 0),
+            label: range === 'today' ? '当日省下' : '折算省下',
+            value: fmtMoney(hero ? hero.savedMoney : 0),
             hint: '按官方单价逐请求累加',
           }),
           h(StatCard, {
-            label: '计入轮次',
-            value: fmtTokens(totals ? totals.turns : 0),
+            label: range === 'today' ? '当日轮次' : '计入轮次',
+            value: fmtTokens(hero ? hero.turns : 0),
             hint: 'provider usage 实测',
           }),
         ),
 
+        h(RangeSwitch, { range: range, onSelect: setRange }),
+
         h(TabBar, { tabs: tabs, active: active, onSelect: setActive }),
 
-        active === '__all__'
+        range === 'today'
+          ? h(DayDetail, { day: today, workspaceId: active === '__all__' ? null : active })
+          : active === '__all__'
           ? h(WorkspaceDetail, {
               row:
                 totals === null
@@ -394,6 +489,9 @@ window.__ModuleLoader__.load({
       '.dcm-card-label{font-size:11px;opacity:.66}',
       '.dcm-card-value{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}',
       '.dcm-card-hint{font-size:11px;opacity:.58;font-variant-numeric:tabular-nums}',
+      '.dcm-range{display:inline-flex;gap:4px;padding:3px;border-radius:9px;background:rgba(128,128,128,.12);margin:4px 0 10px}' +
+      '.dcm-range-btn{all:unset;cursor:pointer;font-size:12px;padding:4px 12px;border-radius:7px;color:inherit;opacity:.7}' +
+      '.dcm-range-btn-active{background:rgba(120,170,255,.28);opacity:1;font-weight:600}' +
       '.dcm-tabs{display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid rgba(128,128,128,.24);padding-bottom:8px}',
       '.dcm-tab{display:flex;align-items:center;gap:8px;border:1px solid rgba(128,128,128,.26);background:transparent;color:inherit;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer}',
       '.dcm-tab:hover{background:rgba(128,128,128,.1)}',

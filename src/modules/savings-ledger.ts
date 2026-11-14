@@ -14,6 +14,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { workspaceRef, type WorkspaceRef } from './workspace'
+import { addToDay, dayKeyOf, daysToRecord, readDays, emptyDayBucket, mergeMissingDays, parseBillingLogAttributed, type DayBucket } from './day-ledger'
 
 export type SavingsModule = 'admission' | 'extraction' | 'dedup' | 'fold' | 'schema' | 'rewrite'
 
@@ -49,6 +50,10 @@ export interface WorkspaceSavingsSnapshot {
   moneyMissTokens?: number
   /** 该工作区逐轮累计的「省下的输出 token」；与上面两项一起才能完整重建金额。 */
   moneyOutTokens?: number
+  /** 该工作区逐轮累计的真实花费（CNY）。 */
+  moneyActualCny?: number
+  /** 该工作区按本地日期分账。 */
+  byDay?: Record<string, DayBucket>
   tokensBeforeTotal: number
   tokensAfterTotal: number
   updatedAt: string
@@ -86,6 +91,8 @@ export interface SavingsSnapshot {
   byWorkspace: Record<string, WorkspaceSavingsSnapshot>
   /** 会话 → 工作区 id，供客户端按会话定位自己的工作区（无需解析路径）。 */
   bySession: Record<string, string>
+  /** 全局按日分账（日期新→旧）；含从日志补齐、无工作区归属的部分。 */
+  byDay: Record<string, DayBucket>
   /**
    * 金额（CNY）：逐轮累加，每轮用该轮实测命中率与峰谷价单独计价。
    * 不做「先汇总 token 再乘平均单价」，因为命中率与峰谷价都不是线性的。
@@ -142,6 +149,8 @@ interface WorkspaceAgg {
   moneyTurns: number
   /** 逐轮累计的真实花费（CNY），与 moneyCny 同源同口径。 */
   moneyActualCny: number
+  /** 按本地日期分账：{ "2026-11-14": {...} }。 */
+  byDay: Map<string, DayBucket>
   updatedAt: number
 }
 
@@ -155,6 +164,8 @@ export interface TurnMoneyInput {
   savedOutTokens?: number
   /** 该轮真实花费（CNY）；用于算「省下 / (省下 + 实花)」这个可审计的百分比。 */
   actualCny?: number
+  /** 归属日期（本地 `YYYY-MM-DD`）；缺省由 `dayKeyOf()` 取当前时刻。 */
+  dayKey?: string
   /** 该轮实测命中率（hitTokens / promptTokens）。 */
   hitRate: number
   /** 该轮所处的计价时段，便于面板解释峰谷差异。 */
@@ -174,6 +185,8 @@ export class SavingsLedger {
   private readonly workspaces = new Map<string, WorkspaceAgg>()
   private readonly bySession = new Map<string, string>()
   private readonly lastEvents: SavingsEvent[] = []
+  /** 全局按日分账（含从日志补齐、无工作区归属的部分）；各工作区的 byDay 是其子集。 */
+  private readonly days = new Map<string, DayBucket>()
   private rejected = 0
 
   /** 记录会话归属，便于消费方按 sessionId 找到对应工作区。 */
@@ -203,6 +216,7 @@ export class SavingsLedger {
         moneyOutTokens: 0,
         moneyTurns: 0,
         moneyActualCny: 0,
+        byDay: new Map<string, DayBucket>(),
         updatedAt: Date.now(),
       }
       this.workspaces.set(ref.id, agg)
@@ -262,6 +276,18 @@ export class SavingsLedger {
     const actualCny = Number(input.actualCny)
     if (Number.isFinite(actualCny) && actualCny > 0) agg.moneyActualCny += actualCny
     agg.moneyTurns += 1
+    const dayKey = input.dayKey || dayKeyOf()
+    if (dayKey) {
+      const delta = {
+        savedTokens: input.savedHitTokens + (input.savedMissTokens ?? 0),
+        savedOutTokens: input.savedOutTokens ?? 0,
+        savedMoney: savedCny,
+        actualMoney: actualCny > 0 ? actualCny : 0,
+        turns: 1,
+      }
+      addToDay(agg.byDay, dayKey, delta)
+      addToDay(this.days, dayKey, delta)
+    }
     agg.updatedAt = Date.now()
     this.revision += 1
     this.updatedAt = Date.now()
@@ -282,6 +308,31 @@ export class SavingsLedger {
       for (const value of Object.values(agg.byModule)) total += value
     }
     return total
+  }
+
+  /**
+   * 用 `billing.recorded` 日志补齐「尚无记录」的日期（重启后当日数据不中断）。
+   *
+   * 只补**缺失**的日期（`mergeMissingDays`），绝不会与实时记账重叠。
+   * 工作区维度只认日志行里自带的 `workspace` 字段：早期日志没有这个字段，
+   * 那部分老实计入「未归属」，绝不按比例摊派——摊派就是估算。
+   */
+  seedDaysFromLog(text: string): number {
+    const parsed = parseBillingLogAttributed(text)
+    if (parsed.days.size === 0) return 0
+    const added = mergeMissingDays(this.days, parsed.days)
+    // 日志里带了工作区的，按 label 归到对应工作区；匹配不上的留作未归属。
+    if (parsed.byWorkspace.size > 0) {
+      for (const agg of this.workspaces.values()) {
+        const label = agg.ref && typeof agg.ref.label === 'string' ? agg.ref.label : ''
+        if (!label) continue
+        const bucketMap = parsed.byWorkspace.get(label)
+        if (!bucketMap) continue
+        mergeMissingDays(agg.byDay, bucketMap)
+        parsed.byWorkspace.delete(label)
+      }
+    }
+    return added
   }
 
   /** 从上次运行的 savings.json 恢复累计（同一工作区跨重启延续，不再每次归零）。 */
@@ -310,9 +361,18 @@ export class SavingsLedger {
       agg.moneyTurns += Math.max(0, Math.round(Number(raw.moneyTurns ?? 0)))
       agg.moneyHitTokens += Math.max(0, Math.round(Number(raw.moneyHitTokens ?? 0)))
       agg.moneyMissTokens += Math.max(0, Math.round(Number(raw.moneyMissTokens ?? 0)))
+      agg.moneyOutTokens += Math.max(0, Math.round(Number(raw.moneyOutTokens ?? 0)))
+      agg.moneyActualCny += Math.max(0, Number(raw.moneyActualCny ?? 0))
+      readDays(agg.byDay, raw.byDay)
       restored += 1
     }
     if (restored === 0) return false
+    // 全局日账：优先用顶层 byDay（含补齐部分）；缺失时退化为各工作区之和。
+    if (!readDays(this.days, snapshot.byDay)) {
+      for (const agg of this.workspaces.values()) {
+        for (const [day, bucket] of agg.byDay) addToDay(this.days, day, bucket)
+      }
+    }
     if (snapshot.bySession && typeof snapshot.bySession === 'object') {
       for (const [sessionId, workspaceId] of Object.entries(snapshot.bySession as Record<string, unknown>)) {
         if (typeof sessionId === 'string' && typeof workspaceId === 'string') {
@@ -393,6 +453,9 @@ export class SavingsLedger {
         moneyTurns: agg.moneyTurns,
         moneyHitTokens: agg.moneyHitTokens,
         moneyMissTokens: agg.moneyMissTokens,
+        moneyOutTokens: agg.moneyOutTokens,
+        moneyActualCny: Math.round(agg.moneyActualCny * 1e6) / 1e6,
+        byDay: daysToRecord(agg.byDay),
         tokensBeforeTotal: agg.tokensBefore,
         tokensAfterTotal: agg.tokensAfter,
         updatedAt: new Date(agg.updatedAt).toISOString(),
@@ -438,6 +501,7 @@ export class SavingsLedger {
       tokensBeforeTotalEstimated: true,
       byWorkspace,
       bySession: Object.fromEntries(this.bySession),
+      byDay: daysToRecord(this.days),
       money: this.sumMoney(prices),
       events,
       folds,

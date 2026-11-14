@@ -16,6 +16,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SavingsLedger = exports.ACCOUNTING_VERSION = void 0;
 const node_crypto_1 = require("node:crypto");
 const workspace_1 = require("./workspace");
+const day_ledger_1 = require("./day-ledger");
 const MAX_EVENTS = 20;
 /**
  * 记账口径版本 2：`saved` 改为真实的 token 差（v1 曾把字符数当 token 记账，
@@ -36,6 +37,8 @@ class SavingsLedger {
     workspaces = new Map();
     bySession = new Map();
     lastEvents = [];
+    /** 全局按日分账（含从日志补齐、无工作区归属的部分）；各工作区的 byDay 是其子集。 */
+    days = new Map();
     rejected = 0;
     /** 记录会话归属，便于消费方按 sessionId 找到对应工作区。 */
     recordSession(sessionId, ref) {
@@ -65,6 +68,7 @@ class SavingsLedger {
                 moneyOutTokens: 0,
                 moneyTurns: 0,
                 moneyActualCny: 0,
+                byDay: new Map(),
                 updatedAt: Date.now(),
             };
             this.workspaces.set(ref.id, agg);
@@ -120,6 +124,18 @@ class SavingsLedger {
         if (Number.isFinite(actualCny) && actualCny > 0)
             agg.moneyActualCny += actualCny;
         agg.moneyTurns += 1;
+        const dayKey = input.dayKey || (0, day_ledger_1.dayKeyOf)();
+        if (dayKey) {
+            const delta = {
+                savedTokens: input.savedHitTokens + (input.savedMissTokens ?? 0),
+                savedOutTokens: input.savedOutTokens ?? 0,
+                savedMoney: savedCny,
+                actualMoney: actualCny > 0 ? actualCny : 0,
+                turns: 1,
+            };
+            (0, day_ledger_1.addToDay)(agg.byDay, dayKey, delta);
+            (0, day_ledger_1.addToDay)(this.days, dayKey, delta);
+        }
         agg.updatedAt = Date.now();
         this.revision += 1;
         this.updatedAt = Date.now();
@@ -139,6 +155,33 @@ class SavingsLedger {
                 total += value;
         }
         return total;
+    }
+    /**
+     * 用 `billing.recorded` 日志补齐「尚无记录」的日期（重启后当日数据不中断）。
+     *
+     * 只补**缺失**的日期（`mergeMissingDays`），绝不会与实时记账重叠。
+     * 工作区维度只认日志行里自带的 `workspace` 字段：早期日志没有这个字段，
+     * 那部分老实计入「未归属」，绝不按比例摊派——摊派就是估算。
+     */
+    seedDaysFromLog(text) {
+        const parsed = (0, day_ledger_1.parseBillingLogAttributed)(text);
+        if (parsed.days.size === 0)
+            return 0;
+        const added = (0, day_ledger_1.mergeMissingDays)(this.days, parsed.days);
+        // 日志里带了工作区的，按 label 归到对应工作区；匹配不上的留作未归属。
+        if (parsed.byWorkspace.size > 0) {
+            for (const agg of this.workspaces.values()) {
+                const label = agg.ref && typeof agg.ref.label === 'string' ? agg.ref.label : '';
+                if (!label)
+                    continue;
+                const bucketMap = parsed.byWorkspace.get(label);
+                if (!bucketMap)
+                    continue;
+                (0, day_ledger_1.mergeMissingDays)(agg.byDay, bucketMap);
+                parsed.byWorkspace.delete(label);
+            }
+        }
+        return added;
     }
     /** 从上次运行的 savings.json 恢复累计（同一工作区跨重启延续，不再每次归零）。 */
     restore(snapshot) {
@@ -171,10 +214,20 @@ class SavingsLedger {
             agg.moneyTurns += Math.max(0, Math.round(Number(raw.moneyTurns ?? 0)));
             agg.moneyHitTokens += Math.max(0, Math.round(Number(raw.moneyHitTokens ?? 0)));
             agg.moneyMissTokens += Math.max(0, Math.round(Number(raw.moneyMissTokens ?? 0)));
+            agg.moneyOutTokens += Math.max(0, Math.round(Number(raw.moneyOutTokens ?? 0)));
+            agg.moneyActualCny += Math.max(0, Number(raw.moneyActualCny ?? 0));
+            (0, day_ledger_1.readDays)(agg.byDay, raw.byDay);
             restored += 1;
         }
         if (restored === 0)
             return false;
+        // 全局日账：优先用顶层 byDay（含补齐部分）；缺失时退化为各工作区之和。
+        if (!(0, day_ledger_1.readDays)(this.days, snapshot.byDay)) {
+            for (const agg of this.workspaces.values()) {
+                for (const [day, bucket] of agg.byDay)
+                    (0, day_ledger_1.addToDay)(this.days, day, bucket);
+            }
+        }
         if (snapshot.bySession && typeof snapshot.bySession === 'object') {
             for (const [sessionId, workspaceId] of Object.entries(snapshot.bySession)) {
                 if (typeof sessionId === 'string' && typeof workspaceId === 'string') {
@@ -253,6 +306,9 @@ class SavingsLedger {
                 moneyTurns: agg.moneyTurns,
                 moneyHitTokens: agg.moneyHitTokens,
                 moneyMissTokens: agg.moneyMissTokens,
+                moneyOutTokens: agg.moneyOutTokens,
+                moneyActualCny: Math.round(agg.moneyActualCny * 1e6) / 1e6,
+                byDay: (0, day_ledger_1.daysToRecord)(agg.byDay),
                 tokensBeforeTotal: agg.tokensBefore,
                 tokensAfterTotal: agg.tokensAfter,
                 updatedAt: new Date(agg.updatedAt).toISOString(),
@@ -295,6 +351,7 @@ class SavingsLedger {
             tokensBeforeTotalEstimated: true,
             byWorkspace,
             bySession: Object.fromEntries(this.bySession),
+            byDay: (0, day_ledger_1.daysToRecord)(this.days),
             money: this.sumMoney(prices),
             events,
             folds,

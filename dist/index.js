@@ -66,6 +66,7 @@ const dedup_bus_1 = require("./modules/dedup-bus");
 const savings_ledger_1 = require("./modules/savings-ledger");
 const billing_1 = require("./modules/billing");
 const panel_1 = require("./panel");
+const node_fs_1 = require("node:fs");
 const workspace_1 = require("./modules/workspace");
 const history_rewriter_1 = require("./modules/history-rewriter");
 const prefix_spill_1 = require("./modules/prefix-spill");
@@ -547,6 +548,22 @@ function apply(ctx, rawConfig = {}) {
     }
     catch (error) {
         (0, log_1.logEvent)('warn', 'savings.restore_failed', { module: 'SavingsLedger', error: String(error) });
+    }
+    // 当日视图不能因为重启而从零开始：用同一份 billing.recorded 日志补齐缺失日期。
+    // 数据源就是 provider usage 那几行，不引入任何新口径。
+    try {
+        const logs = [log_1.LOG_FILE_PATH, `${log_1.LOG_FILE_PATH}.1`];
+        let seeded = 0;
+        for (const file of logs) {
+            if (!file || !fs.existsSync(file))
+                continue;
+            seeded += ledger.seedDaysFromLog(fs.readFileSync(file, 'utf8'));
+        }
+        if (seeded > 0)
+            (0, log_1.logEvent)('info', 'savings.days_seeded', { module: 'SavingsLedger', days: seeded });
+    }
+    catch (error) {
+        (0, log_1.logEvent)('warn', 'savings.days_seed_failed', { module: 'SavingsLedger', error: String(error) });
     }
     let savingsTimer = null;
     const persistSavings = () => {
@@ -1115,6 +1132,8 @@ function apply(ctx, rawConfig = {}) {
                         purpose: record.purpose,
                         model: record.model,
                         window: record.window,
+                        /** 工作区 label：让「当日 × 工作区」可以从日志重建，而不是按比例摊派。 */
+                        workspace: activeTurn?.workspace?.label ?? null,
                         missTokens: record.missTokens,
                         hitTokens: record.hitTokens,
                         outputTokens: record.outputTokens,
@@ -1626,6 +1645,22 @@ function apply(ctx, rawConfig = {}) {
         let bill = null;
         try {
             snapshot = ledger.snapshot();
+            // 兜底：若按日分账为空（日志刚轮转、或本次进程未播种），就地补一次。
+            // 只补缺失的日期，绝不覆盖已有数据，重复调用是幂等的。
+            const days = snapshot?.byDay;
+            if (!days || Object.keys(days).length === 0) {
+                let text = '';
+                try {
+                    text = (0, node_fs_1.readFileSync)(log_1.LOG_FILE_PATH, 'utf8');
+                }
+                catch { }
+                try {
+                    text += (0, node_fs_1.readFileSync)(`${log_1.LOG_FILE_PATH}.1`, 'utf8');
+                }
+                catch { }
+                if (text && ledger.seedDaysFromLog(text) >= 0)
+                    snapshot = ledger.snapshot();
+            }
         }
         catch { }
         try {
