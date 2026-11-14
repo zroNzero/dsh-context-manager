@@ -159,11 +159,11 @@ function jsonResponse(body) {
  */
 function registerPanelRoute(host, read, onError, onMount) {
     let dispose = null;
+    /** 返回 null 表示这个 connection 形状不对，调用方应改用 inject 再试一次。 */
     const mount = (connection) => {
         const registry = connection?.fetch;
         if (registry === null || registry === undefined || typeof registry.register !== 'function') {
-            onError?.('connection.fetch.register 不可用');
-            return () => { };
+            return null;
         }
         const path = exports.PANEL_ROUTE.startsWith('/') ? exports.PANEL_ROUTE : `/${exports.PANEL_ROUTE}`;
         const handle = registry.register({
@@ -202,12 +202,19 @@ function registerPanelRoute(host, read, onError, onMount) {
     try {
         const existing = typeof host.get === 'function' ? host.get('connection') : undefined;
         if (existing !== null && existing !== undefined) {
-            dispose = mount(existing);
-            return () => dispose?.();
+            const mounted = mount(existing);
+            if (mounted !== null) {
+                dispose = mounted;
+                return () => dispose?.();
+            }
         }
         if (typeof host.inject === 'function') {
             host.inject(['connection'], (carrier) => {
-                dispose = mount(serviceOf(carrier));
+                const mounted = mount(serviceOf(carrier));
+                if (mounted === null)
+                    onError?.('connection.fetch.register 不可用');
+                else
+                    dispose = mounted;
             });
             return () => dispose?.();
         }
