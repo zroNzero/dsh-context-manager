@@ -18,6 +18,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.normalizeEffort = normalizeEffort;
 exports.lowerEffort = lowerEffort;
+exports.raiseToBase = raiseToBase;
 exports.oneNotchDown = oneNotchDown;
 exports.lastMessageRole = lastMessageRole;
 exports.looksLikeError = looksLikeError;
@@ -36,6 +37,17 @@ function normalizeEffort(value) {
 /** 取两者中更省的那个；用于「只下调、不上调」。 */
 function lowerEffort(a, b) {
     return RANK[a] <= RANK[b] ? a : b;
+}
+/**
+ * 只升不降：effort 永不低于用户设置。
+ *
+ * `base` 未知时原样返回 `desired` —— 不知道用户要多少就不动它，绝不凭猜测降档。
+ */
+function raiseToBase(desired, base) {
+    const floor = normalizeEffort(base);
+    if (floor === undefined)
+        return desired;
+    return RANK[desired] >= RANK[floor] ? desired : floor;
 }
 /** 降一档：max -> high -> low -> off。 */
 function oneNotchDown(level) {
@@ -204,6 +216,12 @@ function decideEffort(input) {
     }
     // 上限是用户设置（base），不是上游这一步传来的 requested —— 后者可能是我们
     // 上一轮写进会话 header 的降档结果，用它当上限会形成不可逆的单向棘轮。
-    const effort = lowerEffort(desired, base);
+    //
+    // 默认只升不降（allowDowngrade=false）：
+    //   1. 我们写进 config 的 effort 会被宿主固化进会话 header，且**插件卸载后仍然生效**；
+    //      一旦写了低于用户设置的值，就再也没人把它抬回去 —— 实测「关掉插件仍被降档」。
+    //   2. 所以除非显式 allowDowngrade，绝不下探到 user setting 以下；
+    //      base 未知时更不猜，保持 desired（宁可不省，也不擅自降智）。
+    const effort = policy.allowDowngrade === true ? lowerEffort(desired, base) : base;
     return { tier: turn.tier, effort, requested, reason, escalated };
 }

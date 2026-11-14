@@ -195,11 +195,17 @@ exports.Config = zod_1.z.object({
      * 地方省，绝不往上加。实测 reasoning 占输出 60.7%、输出占账单 67.1%。
      */
     dynamicEffortEnabled: zod_1.z.boolean().default(true),
-    effortTrivial: zod_1.z.enum(['off', 'low', 'high', 'max']).default('off'),
+    effortTrivial: zod_1.z.enum(['off', 'low', 'high', 'max']).default('high'),
     effortEasy: zod_1.z.enum(['off', 'low', 'high', 'max']).default('low'),
     effortNormal: zod_1.z.enum(['off', 'low', 'high', 'max']).default('high'),
     effortHard: zod_1.z.enum(['off', 'low', 'high', 'max']).default('max'),
     effortEscalateOnError: zod_1.z.boolean().default(false),
+    /**
+     * 是否允许把 effort 降到用户设置以下。默认 false —— 我们写下的值会被宿主
+     * 固化进会话 header，且插件卸载后仍然生效；降下去就再没人抬回来（实测踩到）。
+     * 需要「杀鸡不用牛刀」时显式开启。
+     */
+    effortAllowDowngrade: zod_1.z.boolean().default(false),
     /** 工具懒加载（v1.3）：只注入 top-K 完整 schema。 */
     /**
      * 动态工具集（Tool Attention 分层）默认关闭 —— 与 keepalive 直接冲突。
@@ -1050,6 +1056,7 @@ function apply(ctx, rawConfig = {}) {
                         normal: config.effortNormal,
                         hard: config.effortHard,
                         escalateOnError: config.effortEscalateOnError,
+                        allowDowngrade: config.effortAllowDowngrade,
                     },
                 });
                 lastEffort = { effort: String(decision.effort), baseline: String(baseline.effort ?? 'max') };
@@ -1083,6 +1090,7 @@ function apply(ctx, rawConfig = {}) {
                         normal: config.effortNormal,
                         hard: config.effortHard,
                         escalateOnError: config.effortEscalateOnError,
+                        allowDowngrade: config.effortAllowDowngrade,
                     },
                 });
                 lastEffort = { effort: String(decision.effort), baseline: String(baseline.effort ?? 'max') };

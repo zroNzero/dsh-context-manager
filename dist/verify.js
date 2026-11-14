@@ -793,13 +793,13 @@ async function main() {
             reasoningEffort: effort,
             messages: [{ role: 'user', content: [{ type: 'text', text }] }],
         });
-        send('把这段 JSON 格式化一下', 'max'); // trivial -> off
-        send('继续', 'max'); // easy -> low
+        send('把这段 JSON 格式化一下', 'max'); // trivial：默认不降档，保持用户设置
+        send('继续', 'max'); // easy：默认不降档，保持用户设置
         send('重构鉴权模块并排查这个死锁', 'max'); // hard -> max 保持不变
         send('重构鉴权模块并排查这个死锁', 'low'); // 上游回传上一轮的低档，也不得棘轮锁死
         disposeE();
-        assert(captured[0].reasoningEffort === 'off', `trivial turn must run at off, got ${captured[0].reasoningEffort}`);
-        assert(captured[1].reasoningEffort === 'low', `easy turn must run at low, got ${captured[1].reasoningEffort}`);
+        assert(captured[0].reasoningEffort === 'max', `trivial turn must hold the user setting, got ${captured[0].reasoningEffort}`);
+        assert(captured[1].reasoningEffort === 'max', `easy turn must hold the user setting, got ${captured[1].reasoningEffort}`);
         assert(captured[2].reasoningEffort === 'max', `hard turn must keep max, got ${captured[2].reasoningEffort}`);
         assert(captured[3].reasoningEffort === 'max', `an echoed low must not ratchet a hard turn down, got ${captured[3].reasoningEffort}`);
     });

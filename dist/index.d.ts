@@ -77,6 +77,7 @@ export declare const Config: z.ZodPrefault<z.ZodObject<{
         max: "max";
     }>>;
     effortEscalateOnError: z.ZodDefault<z.ZodBoolean>;
+    effortAllowDowngrade: z.ZodDefault<z.ZodBoolean>;
     toolAttentionEnabled: z.ZodDefault<z.ZodBoolean>;
     toolAttentionTopK: z.ZodDefault<z.ZodNumber>;
     localBaseUrl: z.ZodDefault<z.ZodString>;

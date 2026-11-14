@@ -563,8 +563,29 @@ check('effort.dynamic-policy', () => {
   )
 
   const easy = [{ role: 'user', content: [{ type: 'text', text: '继续' }] }]
-  const lowered = decideEffort({ messages: easy, requested: 'max', baseline: 'max', policy })
-  assert(lowered.requested === 'max' && lowered.effort === 'low', `easy step from max must drop to low, got ${lowered.effort}`)
+
+  // 默认契约：不降档。effort 恒等于用户设置，写进会话 header 的值也就是用户设置，
+  // 所以卸载插件之后不会被遗留的低档位压着（实测踩过这个坑）。
+  const held = decideEffort({ messages: easy, requested: 'max', baseline: 'max', policy })
+  assert(held.effort === 'max', `default must hold at the user baseline, got ${held.effort}`)
+
+  // 显式开启 allowDowngrade 才允许「杀鸡不用牛刀」：easy 步从 max 降到 low。
+  const downgraded = decideEffort({
+    messages: easy,
+    requested: 'max',
+    baseline: 'max',
+    policy: { ...policy, allowDowngrade: true },
+  })
+  assert(downgraded.effort === 'low', `allowDowngrade must drop an easy step to low, got ${downgraded.effort}`)
+
+  // 即便开启降档，也绝不越过用户设置（上限仍由 baseline 把关）。
+  const capped = decideEffort({
+    messages: [{ role: 'user', content: [{ type: 'text', text: '重构整个模块' }] }],
+    requested: 'max',
+    baseline: 'limited' as any,
+    policy,
+  })
+  assert(capped.effort === 'max', `unknown baseline must fall back to max, got ${capped.effort}`)
 
   // 只下调、不上调：用户设置是上限
   const raised = decideEffort({ messages: [{ role: 'user', content: [{ type: 'text', text: '重构整个模块' }] }], requested: 'max', baseline: 'low', policy })
@@ -605,7 +626,25 @@ check('effort.dynamic-policy', () => {
     baseline: 'max',
     policy,
   })
-  assert(executing.effort === 'high' && executing.reason.endsWith(':execute'), `execution step must drop a notch, got ${executing.effort}`)
+  assert(
+    executing.effort === 'max' && executing.reason.endsWith(':execute'),
+    `默认不降档：执行步必须保持用户设置 max, got ${executing.effort}`,
+  )
+  // 只有显式 allowDowngrade 才允许下探（「杀鸡不用牛刀」要自己打开）
+  const executingDowngraded = decideEffort({
+    messages: [
+      ...hardPrompt,
+      { role: 'assistant', content: [{ type: 'text', text: '开始' }] },
+      { role: 'tool', content: [{ type: 'text', text: 'ok' }] },
+    ],
+    requested: 'max',
+    baseline: 'max',
+    policy: { ...policy, allowDowngrade: true },
+  })
+  assert(
+    executingDowngraded.effort === 'high',
+    `allowDowngrade 下执行步才降一档, got ${executingDowngraded.effort}`,
+  )
   // 执行步兜底：normal/hard 轮次不会掉到 high 以下（校准实测 high→low 省不到钱）
   const floored = decideEffort({
     messages: [
@@ -616,7 +655,7 @@ check('effort.dynamic-policy', () => {
     baseline: 'max',
     policy: { ...policy, hard: 'low' as const },
   })
-  assert(floored.effort === 'high', `hard execution must not sink below high, got ${floored.effort}`)
+  assert(floored.effort === 'max', `默认不降档：hard 执行步保持 max, got ${floored.effort}`)
 
   // 机械轮次的执行步可以到 off —— 那里才是真省
   const mechanical = decideEffort({
@@ -628,7 +667,10 @@ check('effort.dynamic-policy', () => {
     baseline: 'max',
     policy,
   })
-  assert(mechanical.effort === 'off', `trivial execution should run at off, got ${mechanical.effort}`)
+  assert(
+    mechanical.effort === 'max',
+    `默认不降档：机械轮次也保持 max, got ${mechanical.effort}`,
+  )
 })
 
 // ---------------------------------------------------------------------------

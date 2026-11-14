@@ -24,6 +24,12 @@ export interface EffortPolicyConfig {
     hard: EffortLevel;
     /** 轮内出现工具报错时，把该步升级到 hard 档。 */
     escalateOnError: boolean;
+    /**
+     * 是否允许把 effort 降到用户设置以下。
+     * 默认 false：我们写下的值会被宿主固化进会话 header 并在插件卸载后继续生效，
+     * 降下去就没人抬回来（实测「关掉插件仍被降档」）。只有明确要用「杀鸡不用牛刀」时才开。
+     */
+    allowDowngrade?: boolean;
 }
 export interface EffortDecision {
     tier: TurnTier;
@@ -37,6 +43,12 @@ export interface EffortDecision {
 export declare function normalizeEffort(value: unknown): EffortLevel | undefined;
 /** 取两者中更省的那个；用于「只下调、不上调」。 */
 export declare function lowerEffort(a: EffortLevel, b: EffortLevel): EffortLevel;
+/**
+ * 只升不降：effort 永不低于用户设置。
+ *
+ * `base` 未知时原样返回 `desired` —— 不知道用户要多少就不动它，绝不凭猜测降档。
+ */
+export declare function raiseToBase(desired: EffortLevel, base: unknown): EffortLevel;
 /** 降一档：max -> high -> low -> off。 */
 export declare function oneNotchDown(level: EffortLevel): EffortLevel;
 /**
