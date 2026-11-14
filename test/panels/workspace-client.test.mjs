@@ -148,3 +148,14 @@ test('the module installs exactly one stylesheet', async () => {
   await flush(20)
   assert.equal(window.document.querySelectorAll('style#dshwsv-style').length, 1)
 })
+
+// 回归：DSH 会因为 bundle patch 有多行而对同一个包重复加载 client 脚本。
+// __ModuleLoader__.load 对重复 factory id 是抛错的，那会把「重复包含」升级成
+// 启动失败（实盘 crash-2026-11-14T03-52-00-966Z-web-boot.log）。第二次执行必须无害。
+test('evaluating the bundle twice registers the factory only once', () => {
+  const { window } = makeWindow(() => Promise.resolve({ ok: true, json: () => Promise.resolve(okSnapshot) }))
+  let loads = 0
+  window.__ModuleLoader__.load = () => { loads += 1; throw new Error('duplicate factory registration') }
+  assert.doesNotThrow(() => window.eval(SCRIPT), 'the second evaluation must not throw')
+  assert.equal(loads, 0, 'the guard must short-circuit before __ModuleLoader__.load')
+})

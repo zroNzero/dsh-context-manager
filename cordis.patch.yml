@@ -9,7 +9,7 @@
     - id: dsh-context-manager
       name: dsh-context-manager
     - id: dsh-context-manager-panels
-      name: dsh-context-manager/panels
+      name: dsh-context-manager/panels/index.js
       config:
         panels:
           enabled: true

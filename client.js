@@ -15,7 +15,18 @@
  * Data: docs/PANEL-PROTOCOL.md; this surface only renders panels whose id it
  * knows, so another producer can take over later by publishing a panel with
  * the same id.
+ *
+ * Idempotence: this bundle ships from the same package that also exposes the
+ * panel host, and a bundle patch with more than one row makes the host load the
+ * client once per row. `__ModuleLoader__.load` throws on a duplicate factory id,
+ * which turns a harmless double include into a hard boot failure — so we latch
+ * the registration on a window flag and bail out on re-entry.
  */
+;(function registerSavingsClient() {
+  const key = '__dshContextManagerSavingsClient'
+  if (window[key]) return
+  window[key] = true
+
 window.__ModuleLoader__.load({
   id: 'dsh-context-manager-savings',
   factory(require) {
@@ -545,3 +556,4 @@ window.__ModuleLoader__.load({
     }
   },
 })
+})()
