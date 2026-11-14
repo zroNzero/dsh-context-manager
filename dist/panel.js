@@ -175,8 +175,19 @@ function registerPanelRoute(host, read, onError, onMount) {
             fetch: () => jsonResponse(read()),
         });
         onMount?.(path);
-        if (typeof handle === 'function')
-            return handle;
+        if (typeof handle === 'function') {
+            // 契约是 `() => Promise<void>`；必须吞掉 rejection，否则卸载时会冒未处理拒绝。
+            return () => {
+                try {
+                    const pending = handle();
+                    if (pending !== null && typeof pending?.then === 'function') {
+                        ;
+                        pending.then(undefined, () => { });
+                    }
+                }
+                catch { }
+            };
+        }
         return () => {
             try {
                 handle?.dispose?.();

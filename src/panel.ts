@@ -264,7 +264,17 @@ export function registerPanelRoute(
       fetch: () => jsonResponse(read()),
     })
     onMount?.(path)
-    if (typeof handle === 'function') return handle as () => void
+    if (typeof handle === 'function') {
+      // 契约是 `() => Promise<void>`；必须吞掉 rejection，否则卸载时会冒未处理拒绝。
+      return () => {
+        try {
+          const pending = (handle as () => unknown)()
+          if (pending !== null && typeof (pending as any)?.then === 'function') {
+            ;(pending as Promise<unknown>).then(undefined, () => {})
+          }
+        } catch {}
+      }
+    }
     return () => {
       try {
         handle?.dispose?.()
