@@ -202,26 +202,45 @@ export class SavingsLedger {
   private aggFor(ref: WorkspaceRef): WorkspaceAgg {
     let agg = this.workspaces.get(ref.id)
     if (!agg) {
-      agg = {
-        ref,
-        byModule: emptyModuleRecord(),
-        byModuleBefore: emptyModuleRecord(),
-        events: 0,
-        folds: 0,
-        tokensBefore: 0,
-        tokensAfter: 0,
-        moneyCny: 0,
-        moneyHitTokens: 0,
-        moneyMissTokens: 0,
-        moneyOutTokens: 0,
-        moneyTurns: 0,
-        moneyActualCny: 0,
-        byDay: new Map<string, DayBucket>(),
-        updatedAt: Date.now(),
-      }
+      agg = this.emptyAgg(ref)
       this.workspaces.set(ref.id, agg)
+      // 这个工作区此前只有日志归因那一行（`log:` 前缀），真跑起来后把它的账并过来，
+      // 合并成一行，面板里不会出现同名两条。
+      const label = typeof ref.label === 'string' ? ref.label : ''
+      const logOnlyId = `log:${label}`
+      const donated = label && logOnlyId !== ref.id ? this.workspaces.get(logOnlyId) : undefined
+      if (donated) {
+        agg.byDay = donated.byDay
+        agg.tokensBefore += donated.tokensBefore
+        agg.moneyCny += donated.moneyCny
+        agg.moneyActualCny += donated.moneyActualCny
+        agg.moneyTurns += donated.moneyTurns
+        agg.updatedAt = Date.now()
+        this.workspaces.delete(logOnlyId)
+      }
     }
     return agg
+  }
+
+  /** 建一条空的工作区账。 */
+  private emptyAgg(ref: WorkspaceRef): WorkspaceAgg {
+    return {
+      ref,
+      byModule: emptyModuleRecord(),
+      byModuleBefore: emptyModuleRecord(),
+      events: 0,
+      folds: 0,
+      tokensBefore: 0,
+      tokensAfter: 0,
+      moneyCny: 0,
+      moneyHitTokens: 0,
+      moneyMissTokens: 0,
+      moneyOutTokens: 0,
+      moneyTurns: 0,
+      moneyActualCny: 0,
+      byDay: new Map<string, DayBucket>(),
+      updatedAt: Date.now(),
+    }
   }
 
   record(
@@ -321,18 +340,50 @@ export class SavingsLedger {
     const parsed = parseBillingLogAttributed(text)
     if (parsed.days.size === 0) return 0
     const added = mergeMissingDays(this.days, parsed.days)
-    // 日志里带了工作区的，按 label 归到对应工作区；匹配不上的留作未归属。
+    // 日志里带了工作区的，按 label 归到对应工作区。
     if (parsed.byWorkspace.size > 0) {
       for (const agg of this.workspaces.values()) {
         const label = agg.ref && typeof agg.ref.label === 'string' ? agg.ref.label : ''
         if (!label) continue
         const bucketMap = parsed.byWorkspace.get(label)
         if (!bucketMap) continue
-        mergeMissingDays(agg.byDay, bucketMap)
+        this.fillAggFromDays(agg, bucketMap)
         parsed.byWorkspace.delete(label)
+      }
+      // 账本里还没有的工作区：按日志的归因先立一行。否则面板里每个工作区都靠
+      // 自己的 id 去查当日桶，查不到就一律显示 0——看起来就是「所有工作区同数」。
+      for (const [label, bucketMap] of parsed.byWorkspace) {
+        if (!label || label === UNKNOWN_WORKSPACE.label) continue
+        this.fillAggFromDays(this.logRefFor(label), bucketMap)
       }
     }
     return added
+  }
+
+  /** 把日志里某几天的桶补进工作区；只有真正新增的日期才计入累计，避免重复累加。 */
+  private fillAggFromDays(agg: WorkspaceAgg, bucketMap: Map<string, DayBucket>): number {
+    let added = 0
+    for (const [day, bucket] of bucketMap) {
+      if (agg.byDay.has(day)) continue
+      addToDay(agg.byDay, day, bucket)
+      agg.moneyCny += Math.max(0, Number(bucket.savedMoney ?? 0))
+      agg.moneyActualCny += Math.max(0, Number(bucket.actualMoney ?? 0))
+      agg.moneyTurns += Math.max(0, Number(bucket.turns ?? 0))
+      agg.tokensBefore += Math.max(0, Number(bucket.savedTokens ?? 0))
+      added += 1
+    }
+    if (added > 0) agg.updatedAt = Date.now()
+    return added
+  }
+
+  /** 只由日志归因立起来的工作区行（还没有任何会话真跑过）。 */
+  private logRefFor(label: string): WorkspaceAgg {
+    const id = `log:${label}`
+    let agg = this.workspaces.get(id)
+    if (agg) return agg
+    agg = this.emptyAgg({ id, path: label, label })
+    this.workspaces.set(id, agg)
+    return agg
   }
 
   /** 从上次运行的 savings.json 恢复累计（同一工作区跨重启延续，不再每次归零）。 */

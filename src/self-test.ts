@@ -982,6 +982,58 @@ check('prefix.evict-keeps-system-update-anchor', () => {
   assert(!assertSystemUpdateGeometry(broken), 'an update after an assistant turn must be rejected')
 })
 
+// 26b) 从日志回填时，账本里还没有的工作区也必须建行：否则面板里每个工作区都显示 0（同数假象）
+// ---------------------------------------------------------------------------
+
+check('ledger.seed-creates-workspaces-missing-from-ledger', () => {
+  const ledger = new SavingsLedger()
+  const line = (workspace: string, savedCost: number, removed: number) =>
+    JSON.stringify({
+      ts: '2026-11-15T04:20:00.000Z',
+      level: 'debug',
+      event: 'billing.recorded',
+      module: 'Billing',
+      model: 'flash',
+      window: 'offpeak',
+      workspace,
+      missTokens: 100,
+      hitTokens: 1000,
+      outputTokens: 50,
+      removedPromptTokens: removed,
+      effort: 'high',
+      baselineEffort: 'max',
+      actualCost: 1,
+      savedCost,
+    })
+
+  const text = [
+    line('alpha', 3, 5000),
+    line('beta', 5, 7000),
+    // 没有 workspace 字段的行只能算未归属，不许按比例摊派
+    line('', 7, 9000),
+  ].join('\n')
+
+  const seeded = ledger.seedDaysFromLog(text)
+  assert(seeded >= 1, `a day bucket must be created, got ${seeded}`)
+
+  const snapshot = ledger.snapshot()
+  const rows = Object.values(snapshot.byWorkspace) as any[]
+  const money = rows.map((row: any) => row.moneyCny)
+  const labels = rows.map((row: any) => row.label)
+
+  assert(labels.includes('alpha') && labels.includes('beta'), `both workspaces must exist, got ${labels.join(',')}`)
+  assert(new Set(money).size > 1, `per-workspace money must differ, got ${money.join(',')}`)
+
+  const total = rows.reduce((sum: number, row: any) => sum + row.moneyCny, 0)
+  assert(total <= 8 + 1e-9 && total > 0, `unattributed lines must not be pro-rated, got ${total}`)
+
+  // 同一份日志再回填一次不许翻倍
+  const before = JSON.stringify(rows.map((row: any) => row.moneyCny))
+  ledger.seedDaysFromLog(text)
+  const again = JSON.stringify((Object.values(ledger.snapshot().byWorkspace) as any[]).map((row: any) => row.moneyCny))
+  assert(before === again, 'seeding twice must be idempotent')
+})
+
 // 27) 探针结论必须能跨进程复用：否则重启后第一轮不剥离 → 第二轮剥离 → 两次冷读
 // ---------------------------------------------------------------------------
 

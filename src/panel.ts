@@ -183,6 +183,8 @@ function readWorkspaces(snapshot: any, scopeId: string | null = null): PanelWork
     const savedMoney = num(bucket.moneyCny)
     const actualMoney = num(bucket.moneyActualCny)
     const path = str(bucket.workspace)
+    // 只有空壳、没有任何一笔账的工作区不占行（重启后从旧账本恢复出来的空 `(unknown)` 就是这种）。
+    if (savedMoney === 0 && actualMoney === 0 && num(bucket.moneyTurns) === 0 && Object.keys(bucket.byDay || {}).length === 0) continue
     rows.push({
       id,
       label: str(bucket.label) || basename(path) || '(unknown)',

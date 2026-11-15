@@ -149,6 +149,8 @@ export declare class SavingsLedger {
     /** 记录会话归属，便于消费方按 sessionId 找到对应工作区。 */
     recordSession(sessionId: string, ref: WorkspaceRef): void;
     private aggFor;
+    /** 建一条空的工作区账。 */
+    private emptyAgg;
     record(module: SavingsModule, tokens: number, detail?: string, workspace?: WorkspaceRef, beforeTokens?: number): void;
     /** 记录一次请求的 prompt token（压缩前/后）；只计统计，不产生“节省事件”。 */
     recordRequestTokens(workspace: WorkspaceRef | undefined, beforeTokens: number, afterTokens: number): void;
@@ -170,6 +172,10 @@ export declare class SavingsLedger {
      * 那部分老实计入「未归属」，绝不按比例摊派——摊派就是估算。
      */
     seedDaysFromLog(text: string): number;
+    /** 把日志里某几天的桶补进工作区；只有真正新增的日期才计入累计，避免重复累加。 */
+    private fillAggFromDays;
+    /** 只由日志归因立起来的工作区行（还没有任何会话真跑过）。 */
+    private logRefFor;
     /** 从上次运行的 savings.json 恢复累计（同一工作区跨重启延续，不再每次归零）。 */
     restore(snapshot: any): boolean;
     private sumMoney;
