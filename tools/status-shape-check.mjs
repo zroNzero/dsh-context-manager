@@ -1,10 +1,12 @@
 /**
- * 宿主输出校验的忠实模拟：对象节点一律按 `required` + `additionalProperties`
- * 逐层校验，不只是顶层。
+ * 宿主工具契约的两条硬约束：
+ * 1. `output.schema` 会被逐层（含嵌套）校验；
+ * 2. `output.render` 的签名是 `render(args, value)` —— 第一参是调用参数，第二参才是返回值。
  *
- * 为什么需要它：宿主对工具返回值做严格校验，任一层不匹配就把整个结果判为
- * `invalid output` 并退化成空对象 —— costkiller_status 曾因此静默返回 `{}`，
- * 而顶层断言全绿，完全看不出问题。
+ * 为什么需要它：`costkiller_status` 曾静默返回 `{}`。真因不是 schema，而是 render 只声明了
+ * 一个形参，于是没有任何入参的调用把「参数对象 `{}`」当成返回值渲染了出去，日志里恰好是
+ * 1 token。`search_tools` / `read_ref` 同病（渲染出空串）。schema 这条曾经也写严过，
+ * 同样会让宿主退化成 `{}`，所以两条一起守。
  *
  * 用法：node tools/status-shape-check.mjs
  */
@@ -114,5 +116,30 @@ if (errors.length > 0) {
   if (errors.length > 12) console.log(`  …共 ${errors.length} 处`)
   process.exit(1)
 }
+
+// 每个工具都必须按 render(args, value) 渲染：用一个只出现在返回值里的探针，
+// 一旦实现把第一参当返回值，探针就消失。
+// 探针按工具自己声明过的字段投放（有的渲染 JSON，有的只渲染 `text`/`tools` 这类字符串字段），
+// 光靠 arity 不够——箭头函数带默认值或解构时 length 可能骗人。
+const MARKER = '__render_value_probe__'
+let renderBroken = 0
+for (const t of registered) {
+  const render = t.output?.render
+  if (typeof render !== 'function') continue
+  const props = t.output?.schema?.properties ?? {}
+  const probe = { ok: true }
+  for (const [key, spec] of Object.entries(props)) {
+    if (spec?.type === 'string') probe[key] = MARKER
+  }
+  if (!Object.values(probe).includes(MARKER)) probe.marker = MARKER
+  const blocks = render({ unrelated: 'args' }, probe)
+  const text = Array.isArray(blocks) ? blocks.map((b) => b?.text ?? '').join('') : ''
+  if (!text.includes(MARKER)) {
+    console.log(`FAIL: ${t.name} 的 render 没渲染返回值（宿主签名是 render(args, value)）`)
+    console.log(`  实际渲染出: ${JSON.stringify(text.slice(0, 120))}`)
+    renderBroken += 1
+  }
+}
+if (renderBroken > 0) process.exit(1)
 
 console.log('RESULT PASS: 逐层（含嵌套对象）都满足 required 与 additionalProperties')

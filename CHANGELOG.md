@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.4.6 — 修复 `render` 参数顺序（2026-11-15）
+
+现象：v1.4.5 之后 `costkiller_status` 仍然只返回 `{}`；`search_tools` / `read_ref` 更是完全无输出。
+
+根因：宿主 `ToolOutputDefinition.render` 的签名是 `render(args, value)`——第一参是**调用参数**，
+第二参才是返回值。三个工具都写成了 `render(value)`，于是永远渲染的是参数：
+`costkiller_status` 无参数（`args = {}`）→ `JSON.stringify({})` → `{}`，正好 1 token，
+和线上日志 `tokensBefore=1` 严丝合缝；另外两个工具拿 `args.tools` / `args.text` 取值，永远取到空串。
+
+这也解释了 v1.4.5 为什么毫无效果——schema 根本不是瓶颈。
+
+修复：
+- 三个工具的 `render` 全部改成 `(_args, value)`。
+- `search_tools` / `read_ref` 的 `parameters` 原本误写成「属性表」（`{ query: {...} }`），
+  `costkiller_status` 写成 `{}`；统一改成标准 JSON Schema（`type: 'object'` + `properties` +
+  `required` + `additionalProperties: false`），与宿主清单里其他工具一致。
+- `tools/status-shape-check.mjs` 新增渲染签名检查：断言每个工具的 `render.length >= 2`，
+  并按宿主顺序调用 `render(args, 探针值)` 验证真值确实被渲染出来。它现在能直接抓住这个 bug。
+
 ## v1.4.5 — 修复 `costkiller_status` 恒返回 `{}`（2026-11-15）
 
 现象：`costkiller_status` 每次调用都只拿到 `{}`（日志 `tokensBefore=1`），面板数据还在、工具却读不到。

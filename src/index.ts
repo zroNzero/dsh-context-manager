@@ -367,7 +367,11 @@ function buildStatusTool(getStatus: () => Record<string, unknown>) {
   return {
     name: 'costkiller_status',
     description: 'Return dsh-context-manager token savings and runtime counters (savings panel data).',
-    parameters: {},
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
     output: {
       // 宿主会按这份 schema 做深校验，任何一层写严了（含未声明的嵌套字段）都会让整次调用
       // 变成空结果。这里一律放行，字段由 render 原样吐给模型。
@@ -375,7 +379,8 @@ function buildStatusTool(getStatus: () => Record<string, unknown>) {
         type: 'object',
         additionalProperties: true,
       },
-      render: (value: unknown) => [{ type: 'text', text: JSON.stringify(value) }],
+      // 宿主签名是 render(args, value)：第一参是调用参数，第二参才是返回值。
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     execute: async () => getStatus(),
   }
@@ -640,7 +645,12 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       name: 'search_tools',
       description: 'Return the full JSON schema of tools hidden by lazy loading. Query by tool name or keywords.',
       parameters: {
-        query: { type: 'string', description: 'tool name or keywords', required: true },
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'tool name or keywords' },
+        },
+        required: ['query'],
+        additionalProperties: false,
       },
       output: {
         schema: {
@@ -649,7 +659,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
           required: ['ok', 'tools'],
           additionalProperties: false,
         },
-        render: (value: any) => [{ type: 'text', text: String(value?.tools ?? '') }],
+        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value?.tools ?? '') }],
       },
       execute: async (exec: any) => {
         const query = String(exec?.parameters?.query ?? exec?.query ?? '').toLowerCase()
@@ -679,7 +689,12 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
       name: 'read_ref',
       description: 'Read the full content of a spilled tool result by its [PIPE] ref (e.g. pipe-1a2b3c4d5e6f).',
       parameters: {
-        ref: { type: 'string', description: 'PIPE reference', required: true },
+        type: 'object',
+        properties: {
+          ref: { type: 'string', description: 'PIPE reference' },
+        },
+        required: ['ref'],
+        additionalProperties: false,
       },
       output: {
         schema: {
@@ -688,7 +703,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
           required: ['ok', 'text'],
           additionalProperties: false,
         },
-        render: (value: any) => [{ type: 'text', text: String(value?.text ?? '') }],
+        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value?.text ?? '') }],
       },
       execute: async (exec: any) => {
         const ref = String(exec?.parameters?.ref ?? exec?.ref ?? '')
