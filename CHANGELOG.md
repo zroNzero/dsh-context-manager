@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.4.0 — 节省面板与 effort 棘轮修复（2026-11-15）
+
+面板（UI 半 `client.js` + host 路由 `api/dsh-context-manager/summary`）：
+
+- **左侧栏「节省」条目 + 独立页面 + 会话内「节省」标签页**。`sidebar.panellist.id`
+  与 `main.key` 同名，标签页注册到 `conversation.view`（order 40，排在 对话/上下文/编队 之后）。
+- **当日 / 累计两种口径**，按本地日期分账（`byDay`）；启动时从 `billing.recorded` 日志
+  回填历史日期，`mergeMissingDays` 幂等，不覆盖已有数据。
+- **按工作区隔离**：标签页把自己的 `sessionId` 交给路由，账本用 `bySession` 映射到工作区，
+  再过滤 `byWorkspace` / `byDay`。未知会话显式返回 0，不回落到全局（否则会"领别人的钱"）。
+- **金额只用实测数据**：`Σ(省下hit×0.02 + 省下miss×1 + 省下out×4)/1M`，高峰轮 ×2；
+  token 全部来自 provider `usage`。面板逐轮累加金额，不从 token 反推，避免跨峰谷失真。
+- **单工作区时隐藏冗余**：作用域内只剩一个工作区时，「合计/工作区」标签栏与 hero 行
+  会和明细重复同一组数字，直接不渲染。
+- 路由注册失败必须留痕：`panel.route.attempt` / `.ready` / `.unavailable`（静默失败最难查）。
+
+Effort：
+
+- **修复单向棘轮**：`config.effort` 会被宿主固化进会话 header 且在插件卸载后继续生效。
+  旧实现按「执行步降一档」下调，写回的 `high` 又成为下一轮基线，结果 94.9% 的请求
+  从 `max` 漂到 `high`，且关掉插件也回不来。
+- 新增 `effortAllowDowngrade`（默认 **false**）：默认原样透传用户设置，一步不动；
+  显式开启才允许下探（保留「杀鸡不用牛刀」的能力）。
+- `effortTrivial` 默认 `off → high`、`effortEasy` 默认 `low → high`，消除与
+  `docs/REDLINES.md` RL-4「不把 effort 降到 low/off」的冲突。
+
+其它：
+
+- `templates/panel-plugin/`：可复制的面板插件骨架 + `check-slots.mjs` 契约自检。
+- `tools/`：新增 `panel-check` / `scope-check` / `day-check` / `route-harness` /
+  `route-order-check` 五个离线门禁，并补 `tools/README.md` 索引。
+- 测试：self-test 34/34、verify 35/35。
+
 ## Unreleased — thinking 模式硬约束（2026-11-11 事故后）
 
 真实故障：`INVALID_REQUEST: The content[].thinking in the thinking mode must be passed back to the API`，

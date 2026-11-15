@@ -49,7 +49,20 @@ for (const sessionId of sessions.slice(0, 20)) {
   if (Number(summary.totals.savedMoney) > ownTotal + 1e-6) {
     problems.push(`${sessionId}: 累计 ${summary.totals.savedMoney} 超过本工作区总额 ${ownTotal}`)
   }
-  if (summary.days.length > 1) problems.push(`${sessionId}: days 出现 ${summary.days.length} 天（应只有该工作区的日期）`)
+  // days 必须恰好是该工作区自己记过账的日期：既不能多（别人的天），也不能少。
+  const ownDates = Object.keys(wsOf(wsId).byDay ?? {}).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort()
+  const gotDates = summary.days.map((d) => d.date).sort()
+  if (gotDates.join(',') !== ownDates.join(',')) {
+    problems.push(`${sessionId}: days=[${gotDates.join(',')}] 应为 [${ownDates.join(',')}]`)
+  }
+  // 每一天的金额也要逐格对齐，避免「日期对、数字错」。
+  for (const dayView of summary.days) {
+    const ownDay = (wsOf(wsId).byDay ?? {})[dayView.date]
+    const expectMoney = ownDay ? Number(ownDay.savedMoney) || 0 : 0
+    if (!near(dayView.totals.savedMoney, expectMoney)) {
+      problems.push(`${sessionId} @${dayView.date}: savedMoney=${dayView.totals.savedMoney} 应为 ${expectMoney}`)
+    }
+  }
 }
 
 /** 不带 sessionId：全量，且不能冒用某个工作区的名字。 */

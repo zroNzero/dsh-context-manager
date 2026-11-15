@@ -62,6 +62,36 @@ flowchart LR
 
 ## 节省面板
 
+### 内置面板（左侧栏 + 独立页面 + 会话标签）
+
+插件自带 UI 半，不需要装别的面板插件：
+
+| 位置 | 说明 |
+|---|---|
+| 左侧栏「节省」 | 独立页面，全量视图，顶部**按工作区分组**，可切「当日 / 累计」 |
+| 会话标签页「节省」 | 与「对话 / 上下文 / 编队」并列，**只显示当前会话所属工作区**的数据 |
+
+数据由 host 半的只读路由提供：`POST /api/dsh-context-manager/summary`，返回
+`{ ok: true, ... }`。会话标签页会把 `sessionId` 放进请求体，host 用账本的
+`bySession` 映射到工作区后**在服务端过滤**——不是前端隐藏，也不是按比例摊派。
+`main`（左侧栏页面）不绑定会话，所以显示全量。
+
+金额口径（可逐项复算，不含估算）：
+
+```
+省钱¥ = Σ 每轮 [ (省下的命中 token × 0.02) + (省下的未命中 token × 1) + (省下的输出 token × 4) ] / 1e6
+        高峰时段该轮单价 ×2
+占应发 = 省钱¥ ÷ (省钱¥ + 实花¥)
+```
+
+三个 token 分量都来自 provider 返回的 `usage`，单价来自官方价目表；
+`省下占比` 有上界（不会出现 >100%）。
+
+想把同样的面板做进自己的插件：`templates/panel-plugin/` 是可复制的骨架，
+含 `tools/check-slots.mjs` 自检 id/key 对齐等四个静默失败点。
+
+### 落盘文件
+
 插件运行时会持续写入两份面板文件（相对 DSH 进程工作目录，通常是 profile 目录）：
 
 - `savings.md` —— 人类可读的 Markdown 面板（总量 / 分模块 / 最近事件）
@@ -90,6 +120,12 @@ flowchart LR
 - **比例分母**：`tokensBeforeTotal / tokensAfterTotal` 是每次请求 prompt token 的累计
   （压缩前/后），消费方用 `1 - after/before` 算比例；当前只覆盖 schema 维度，
   因此带 `tokensBeforeTotalEstimated: true`。
+- **金额**：`money` 是逐轮计价的三分量累计（`savedHitTokens / savedMissTokens /
+  savedOutTokens` + `turns` + `basis.effectiveHitRate`）；`realBill` 是本进程的
+  provider 实测账单（`actualCost / counterfactualCost / reduction / removedTokens`）。
+  两者都可直接显示，**不要在前端重算单价**。
+- **按日**：顶层 `byDay["YYYY-MM-DD"]` 是全局按日累计（本地时区），
+  `byWorkspace[id].byDay` 是该工作区的按日累计。跨天不重算、不估算。
 
 ## 安装
 
@@ -97,7 +133,7 @@ flowchart LR
 dsh install D:\path\to\dsh-context-manager
 ```
 
-或在 DSH profile 的 `package.json` 中加入 `file:` 依赖并把 `cost-killer-orchestrator`
+或在 DSH profile 的 `package.json` 中加入 `link:` 依赖并把 `dsh-context-manager`
 放进 `dsh.profile.bundles`，然后 `pnpm install` 并重启 DSH。
 
 ## 配置（cordis.patch.yml）
@@ -125,12 +161,13 @@ dsh install D:\path\to\dsh-context-manager
         keepaliveTtlMs: 240000
         keepaliveRefreshes: 4
         keepaliveMinPromptTokens: 500   # 收益与 prompt 量级成正比，阈值只需挡掉微不足道的请求
-        dynamicEffortEnabled: true      # 按任务难度分配思考预算，只下调不上调
-        effortTrivial: off
-        effortEasy: low
+        dynamicEffortEnabled: true      # 开关；只有 effortAllowDowngrade 打开时才会真正改变 effort
+        effortTrivial: high             # 下限：任何档位都不低于 high（off/low 违反 RL-4）
+        effortEasy: high
         effortNormal: high
-        effortHard: max                 # 规划步用这个档；执行步自动降一档
-        effortEscalateOnError: true     # 工具报错时回到高思考（诊断需要深度）
+        effortHard: max                 # 档位上限；只有 allowDowngrade 打开时才会低于用户设置
+        effortEscalateOnError: true     # 工具报错时升到 hard 档（升档无害）
+        effortAllowDowngrade: false     # true 才启用「执行步降一档」；默认关闭，避免单向棘轮
         outputGuardEnabled: false       # 会砍掉正常回答（首个代码块/JSON 闭合即停），默认关
         localBaseUrl: http://127.0.0.1:11434
         compressionBudgetMs: 50
@@ -143,9 +180,20 @@ dsh install D:\path\to\dsh-context-manager
 
 ```powershell
 npm run build     # tsc
-npm run test      # CacheAnchor 公式 / AST / Fail-Closed
-npm run verify    # 16 项宿主形态验收断言
+npm run test      # 34 项：CacheAnchor 公式 / AST / Fail-Closed / 面板金额可复算
+npm run verify    # 35 项宿主形态验收断言 + effort 边界
 npm run demo      # 端到端压缩、缓存门控、路由、GC、去重
+```
+
+面板相关的离线门禁（都不需要重启 DSH）：
+
+```powershell
+node tools/panel-check.mjs        # 金额只由三项 token × 官方单价构成，残差在浮点噪声内
+node tools/scope-check.mjs         # 每个会话只看到自己工作区的当日/累计，未知会话显式清零
+node tools/day-check.mjs           # 按日分账：日志回填、幂等、跨重启保持
+node tools/route-harness.mjs       # 路由挂载（含 ctx.inject 载体）与真实账本链路
+node tools/route-order-check.mjs   # sidebar.panellist.id == main.key，注册顺序正确
+node templates/panel-plugin/tools/check-slots.mjs client.js   # UI 半的槽位契约
 ```
 
 ## 设计红线

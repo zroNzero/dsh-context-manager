@@ -1,13 +1,23 @@
 {
   "name": "dsh-context-manager",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "description": "dsh-context-manager (CostKillerOrchestrator): cache-aligned context governance for DSH (Admission / Extraction / Memory / CacheAnchor / Routing / SchemaIndex / DedupBus)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zroNzero/dsh-context-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zroNzero/dsh-context-manager/issues"
+  },
+  "homepage": "https://github.com/zroNzero/dsh-context-manager#readme",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist",
     "client.js",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "templates"
   ],
   "scripts": {
     "build": "tsc",

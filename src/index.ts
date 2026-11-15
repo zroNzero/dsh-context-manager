@@ -177,10 +177,10 @@ export const Config = z.object({
    */
   dynamicEffortEnabled: z.boolean().default(true),
   effortTrivial: z.enum(['off', 'low', 'high', 'max']).default('high'),
-  effortEasy: z.enum(['off', 'low', 'high', 'max']).default('low'),
+  effortEasy: z.enum(['off', 'low', 'high', 'max']).default('high'),
   effortNormal: z.enum(['off', 'low', 'high', 'max']).default('high'),
   effortHard: z.enum(['off', 'low', 'high', 'max']).default('max'),
-  effortEscalateOnError: z.boolean().default(false),
+  effortEscalateOnError: z.boolean().default(true),
   /**
    * 是否允许把 effort 降到用户设置以下。默认 false —— 我们写下的值会被宿主
    * 固化进会话 header，且插件卸载后仍然生效；降下去就再没人抬回来（实测踩到）。
