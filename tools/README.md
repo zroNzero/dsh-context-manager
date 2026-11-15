@@ -12,6 +12,7 @@
 | `day-check.mjs` | 按日分账：日志解析、补齐不覆盖、跨重启持久化、非法日期忽略 |
 | `route-harness.mjs` | host 路由契约：绝对路径挂载、`{ok:true}` envelope、真实账本经路由可返回、dispose 干净 |
 | `route-order-check.mjs` | 客户端 `main` / `sidebar.panellist` 的注册顺序与 id/key 对齐 |
+| `status-shape-check.mjs` | `costkiller_status` 的返回必须逐层（含嵌套对象）满足它自己声明的 schema |
 | `replay-verify.mjs` | 用真实会话转录离线重放压缩，验证「三档改写不破坏请求合法性」 |
 | `prefix-replay.mjs` | 前缀稳定性回放 |
 | `cache-opportunity.mjs` | 缓存可复用窗口与机会成本 |
