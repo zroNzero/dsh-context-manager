@@ -28,6 +28,7 @@ exports.evictOldEpisodes = evictOldEpisodes;
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const contracts_1 = require("../contracts");
+const wire_shape_1 = require("./wire-shape");
 const CALL_TYPES = new Set(['tool-call']);
 /**
  * 配对完整性硬校验（Fail-Closed 的唯一依据）。
@@ -125,6 +126,12 @@ function evictOldEpisodes(messages, options) {
         if (id)
             resultIndex.set(id, index);
     });
+    /**
+     * 「系统更新落位锚点」：这些工具结果一旦删掉，宿主序列化器就没法把紧跟其后的
+     * in-history system/developer 更新落到 user 槽位上，整轮报 UNSUPPORTED_CONTENT。
+     * 锚点轮次直接放弃逐出（见 wire-shape.ts 的事故说明）。
+     */
+    const anchors = (0, wire_shape_1.wireAnchorToolIndices)(messages);
     const drop = new Set();
     const out = messages.slice();
     for (let index = 0; index < cutoff; index += 1) {
@@ -159,6 +166,11 @@ function evictOldEpisodes(messages, options) {
         if (adjacent.some((id) => !want.has(id)))
             continue;
         const matchedResults = bulk.map((block) => resultIndex.get(String(block?.id ?? '')));
+        if (matchedResults.some((at) => anchors.has(at))) {
+            // 这条结果正被一段系统更新占着落位槽，删了就会让整轮请求失败。
+            stats.anchored = (stats.anchored ?? 0) + 1;
+            continue;
+        }
         let original = contentText(message.content);
         for (const resultAt of matchedResults) {
             original += `\n--- tool result ---\n${contentText(messages[resultAt]?.content)}`;
@@ -203,7 +215,10 @@ function evictOldEpisodes(messages, options) {
      * 宁可这一轮一分钱不省，也不能让宿主拿到一份会被它拒绝的消息表。
      */
     if (!assertToolPairing(pruned)) {
-        return { messages, stats: { episodes: 0, droppedMessages: 0, charsSaved: 0, files: [], rejected: true } };
+        return {
+            messages,
+            stats: { episodes: 0, droppedMessages: 0, charsSaved: 0, files: [], rejected: true, anchored: stats.anchored },
+        };
     }
     return { messages: pruned, stats };
 }

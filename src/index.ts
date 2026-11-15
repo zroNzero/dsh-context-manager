@@ -43,6 +43,7 @@ import { workspaceRef, workspaceRefFromSession, type WorkspaceRef } from './modu
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
 import { evictOldEpisodes } from './modules/episode-evict'
+import { assertSystemUpdateGeometry } from './modules/wire-shape'
 import {
   probeCacheKey,
   probeStaleReasoning,
@@ -937,6 +938,29 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
               : null
             const next = stripStats ? stripStats.messages : folded.messages
             /**
+             * Fail-Closed 第二道闸（2026-11-15 14:26 线上事故）：
+             * 宿主的 Messages 序列化器要求 in-history 系统更新前面必须站着一条
+             * user / 工具结果；整对逐出删掉的工具结果可能正是那个落位锚点，
+             * 于是整轮报 `UNSUPPORTED_CONTENT: system update without a preceding
+             * user or tool-result turn`，并且在压缩换掉这段历史之前一直失败
+             * （实测连续 4 轮）。逐出侧已经用 wireAnchorToolIndices 绕开锚点，
+             * 这里再按宿主同构规则复核一遍：形状不对就整轮不省，原样发出去。
+             */
+            if (!assertSystemUpdateGeometry(next)) {
+              logEvent('warn', 'history.rewrite_rejected', {
+                module: 'PrefixSpill',
+                reason: 'system-update-geometry',
+                messages: Array.isArray(messages) ? messages.length : 0,
+              })
+              return {
+                messages,
+                beforeTokens: estimateTokens(JSON.stringify(messages)),
+                afterTokens: estimateTokens(JSON.stringify(messages)),
+                saved: 0,
+                rewritten: 0,
+              }
+            }
+            /**
              * 折叠与剥 thinking 的真实结果必须落日志。
              * 之前只有 `removedPromptTokens` 一个汇总数，看不出剥 thinking 到底有没有生效
              * （`payloadChars` 一直停在 680K，而预测应到 172K），只能靠猜。
@@ -979,6 +1003,7 @@ export function apply(ctx: Context, rawConfig: Partial<CostKillerConfig> = {}): 
                 evictSaved: evicted.stats ? evicted.stats.charsSaved : 0,
                 evictDropped: evicted.stats ? evicted.stats.droppedMessages : 0,
                 evictRejected: evicted.stats ? evicted.stats.rejected === true : false,
+                evictAnchored: evicted.stats ? (evicted.stats.anchored ?? 0) : 0,
                 foldCharsSaved: folded.stats.charsBefore - folded.stats.charsAfter,
                 folded: folded.stats.folded,
                 stripAllowed: staleReasoningAllowed,

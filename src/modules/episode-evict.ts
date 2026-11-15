@@ -22,6 +22,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { hashText } from '../contracts'
+import { wireAnchorToolIndices } from './wire-shape'
 
 export interface EpisodeEvictOptions {
   spillDir?: string
@@ -38,6 +39,8 @@ export interface EpisodeEvictStats {
   files: string[]
   /** 配对校验没过、已整体放弃的那一轮（Fail-Closed 标记，供日志观测）。 */
   rejected?: boolean
+  /** 因为充当「系统更新落位锚点」而放弃逐出的轮数（见 wire-shape.ts）。 */
+  anchored?: number
 }
 
 const CALL_TYPES = new Set(['tool-call'])
@@ -132,6 +135,13 @@ export function evictOldEpisodes(
     if (id) resultIndex.set(id, index)
   })
 
+  /**
+   * 「系统更新落位锚点」：这些工具结果一旦删掉，宿主序列化器就没法把紧跟其后的
+   * in-history system/developer 更新落到 user 槽位上，整轮报 UNSUPPORTED_CONTENT。
+   * 锚点轮次直接放弃逐出（见 wire-shape.ts 的事故说明）。
+   */
+  const anchors = wireAnchorToolIndices(messages)
+
   const drop = new Set<number>()
   const out = messages.slice()
 
@@ -164,6 +174,11 @@ export function evictOldEpisodes(
     if (adjacent.some((id) => !want.has(id))) continue
 
     const matchedResults = bulk.map((block: any) => resultIndex.get(String(block?.id ?? '')) as number)
+    if (matchedResults.some((at: number) => anchors.has(at))) {
+      // 这条结果正被一段系统更新占着落位槽，删了就会让整轮请求失败。
+      stats.anchored = (stats.anchored ?? 0) + 1
+      continue
+    }
     let original = contentText(message.content)
     for (const resultAt of matchedResults) {
       original += `\n--- tool result ---\n${contentText(messages[resultAt]?.content)}`
@@ -209,7 +224,10 @@ export function evictOldEpisodes(
    * 宁可这一轮一分钱不省，也不能让宿主拿到一份会被它拒绝的消息表。
    */
   if (!assertToolPairing(pruned)) {
-    return { messages, stats: { episodes: 0, droppedMessages: 0, charsSaved: 0, files: [], rejected: true } }
+    return {
+      messages,
+      stats: { episodes: 0, droppedMessages: 0, charsSaved: 0, files: [], rejected: true, anchored: stats.anchored },
+    }
   }
   return { messages: pruned, stats }
 }

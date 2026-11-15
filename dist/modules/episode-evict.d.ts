@@ -32,6 +32,8 @@ export interface EpisodeEvictStats {
     files: string[];
     /** 配对校验没过、已整体放弃的那一轮（Fail-Closed 标记，供日志观测）。 */
     rejected?: boolean;
+    /** 因为充当「系统更新落位锚点」而放弃逐出的轮数（见 wire-shape.ts）。 */
+    anchored?: number;
 }
 /**
  * 配对完整性硬校验（Fail-Closed 的唯一依据）。

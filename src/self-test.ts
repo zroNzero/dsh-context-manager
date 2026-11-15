@@ -19,6 +19,7 @@ import { estimateTokens } from './contracts'
 import { rewriteMessages } from './modules/history-rewriter'
 import { foldOldToolResults } from './modules/prefix-spill'
 import { evictOldEpisodes, assertToolPairing } from './modules/episode-evict'
+import { assertSystemUpdateGeometry, wireAnchorToolIndices } from './modules/wire-shape'
 import { probeCacheKey, readProbeCache, stripStaleReasoning, writeProbeCache } from './modules/reasoning-drop'
 import { planMemoryFold, type MemoryEntry } from './modules/memory'
 import { HostSimulator, simulateRangeFold, validateMessages } from './host-sim'
@@ -933,6 +934,52 @@ check('prefix.tool-pairing-validator', () => {
   // 顺序颠倒
   const reversed = [ok[0], ok[2], ok[1]]
   assert(!assertToolPairing(reversed), 'result before call must fail')
+})
+
+// ---------------------------------------------------------------------------
+// 28b) 系统更新落位：删掉「锚点」工具结果会让整轮报 UNSUPPORTED_CONTENT
+//      线上事故 2026-11-15 14:26（turn 83 step 8，连续失败 4 轮）
+// ---------------------------------------------------------------------------
+
+check('prefix.evict-keeps-system-update-anchor', () => {
+  const bigArgs = JSON.stringify({ file_path: 'x', content: 'y'.repeat(900) })
+  const call = (id: string) => ({ type: 'tool-call', id, name: 'edit', arguments: bigArgs })
+  const update = (text: string) => ({ role: 'system', content: [{ type: 'text', text }] })
+  const addition = { role: 'developer', content: [{ type: 'tool-addition', toolName: 'remote_execute' }] }
+  const user = { role: 'user', content: [{ type: 'text', text: '继续' }] }
+  const reply = (text: string) => ({ role: 'assistant', content: [{ type: 'text', text }] })
+  const result = (id: string, text = 'ok') => ({ role: 'tool', toolCallId: id, content: [{ type: 'text', text }] })
+
+  // 事故形状：工具结果后面紧跟一条系统更新，它就是这个更新的落位锚点
+  const anchored = [
+    user,
+    { role: 'assistant', content: [call('a')] },
+    result('a'),
+    update('system prompt v2'),
+    addition,
+    { role: 'assistant', content: [call('b')] },
+    result('b'),
+    reply('尾部'),
+  ]
+  assert(assertSystemUpdateGeometry(anchored), 'the incident history itself must serialize')
+  assert(wireAnchorToolIndices(anchored).has(2), 'the tool result feeding the update is the anchor')
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ck-anchor-'))
+  const kept = evictOldEpisodes(anchored, { spillDir: dir, retainRecent: 1, minArgChars: 600 })
+  assert(kept.stats.anchored === 1, `the anchored episode must be skipped, got ${kept.stats.anchored ?? 0}`)
+  assert(kept.messages.some((message: any) => message?.toolCallId === 'a'), 'the anchor result must survive')
+  assert(assertSystemUpdateGeometry(kept.messages), 'anchored eviction must keep the wire legal')
+
+  // 去掉那条更新后，同一轮就不再是锚点，必须照常逐出（证明保护是定向的，不是一刀切）
+  const free = [user, { role: 'assistant', content: [call('a')] }, result('a'), { role: 'assistant', content: [call('c')] }, result('c'), reply('尾部')]
+  assert(wireAnchorToolIndices(free).size === 0, 'no update means no anchor')
+  const evicted = evictOldEpisodes(free, { spillDir: dir, retainRecent: 1, minArgChars: 600 })
+  assert(evicted.stats.episodes >= 1, `a free episode must still be evicted, got ${evicted.stats.episodes}`)
+  assert(!evicted.messages.some((message: any) => message?.toolCallId === 'a'), 'the free result must be dropped')
+
+  // 序列化器同构校验必须能判否：assistant 直接撞上未落位的更新
+  const broken = [user, reply('答'), update('system prompt v2'), addition, { role: 'assistant', content: [call('d')] }]
+  assert(!assertSystemUpdateGeometry(broken), 'an update after an assistant turn must be rejected')
 })
 
 // 27) 探针结论必须能跨进程复用：否则重启后第一轮不剥离 → 第二轮剥离 → 两次冷读

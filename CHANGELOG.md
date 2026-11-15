@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.4.3 — 修复「整对逐出删掉系统更新锚点导致整轮失败」（2026-11-15）
+
+线上事故：2026-11-15 14:26（turn 83 step 8）起，同一会话连续 4 轮报
+
+```
+DeepSeek Messages cannot represent system update without a preceding user or tool-result turn
+UNSUPPORTED_CONTENT
+```
+
+根因在宿主的 Messages 序列化器，不在模型：`deepseek-account` 的 `systemPromptUpdate`
+是 `in-history`，系统提示词每变一次（例如 `toolAttentionEnabled` 让工具集变化，宿主就追加
+一条 `system` 快照 + 一条 `developer` tool-addition/removal），序列化器就要求这条更新
+**紧跟在 user / 工具结果之后**落位（工具结果在 wire 上就是 user 角色）。而整对逐出会把
+「tool-call + 工具结果」一起删掉——被删的那条工具结果正好是下一段系统更新的唯一落位锚点时，
+wire 上最后一条就变成 assistant，宿主直接拒收，且会持续失败到压缩换掉这段历史为止。
+
+- 新增 `src/modules/wire-shape.ts`：`wireAnchorToolIndices`（算出哪些工具结果是落位锚点）
+  与 `assertSystemUpdateGeometry`（与宿主序列化器同构的复核）。
+- `evictOldEpisodes` 跳过锚点轮次（`stats.anchored` 计数，日志 `evictAnchored`）：
+  定向保护，不牵连其它轮次——事故现场只放弃 1 轮、约 1.3 KB。
+- 重写链尾部加 **Fail-Closed 闸门**：形状复核不过就整轮不省、原样发出去
+  （`history.rewrite_rejected`），宁可零节省也不再交出会被拒的消息表。
+- 回归：self-test 新增 `prefix.evict-keeps-system-update-anchor`（含「非锚点仍照常逐出」
+  与「序列化器同构校验能判否」两侧），35/35；verify 35/35。
+- 用事故现场的真实历史（session 794b93ff，1856 条消息）离线复算：修复前逐出阶段即判否，
+  修复后逐出 → 折叠 → 剥 thinking 三步全过。
+
 ## v1.4.1 — 让 `costkiller_status` 不再整份失效（2026-11-15）
 
 - `costkiller_status` 的输出 schema 由「26 个必填字段 + `additionalProperties: false`」
