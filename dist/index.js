@@ -377,90 +377,10 @@ function buildStatusTool(getStatus) {
         description: 'Return dsh-context-manager token savings and runtime counters (savings panel data).',
         parameters: {},
         output: {
+            // 宿主会按这份 schema 做深校验，任何一层写严了（含未声明的嵌套字段）都会让整次调用
+            // 变成空结果。这里一律放行，字段由 render 原样吐给模型。
             schema: {
                 type: 'object',
-                properties: {
-                    ok: { type: 'boolean' },
-                    admitted: { type: 'number' },
-                    extracted: { type: 'number' },
-                    folds: { type: 'number' },
-                    savedTokens: { type: 'number' },
-                    rejectedByAnchor: { type: 'number' },
-                    deduped: { type: 'number' },
-                    savedByAdmission: { type: 'number' },
-                    savedByExtraction: { type: 'number' },
-                    savedByDedup: { type: 'number' },
-                    savedByFold: { type: 'number' },
-                    savedBySchema: { type: 'number' },
-                    perRequestSavings: { type: 'number' },
-                    eventSavings: { type: 'number' },
-                    contextReduction: { type: 'number' },
-                    estimatedCostTokens: { type: 'number' },
-                    tokensBeforeTotal: { type: 'number' },
-                    tokensAfterTotal: { type: 'number' },
-                    workspaceCount: { type: 'number' },
-                    schemaVersion: { type: 'number' },
-                    ledgerId: { type: 'string' },
-                    revision: { type: 'number' },
-                    savingsFile: { type: 'string' },
-                    /**
-                     * 真实账单必须在这里声明完整：
-                     * 宿主按 `additionalProperties: false` 校验工具返回值，少声明一个字段
-                     * 整个工具就报 `returned invalid output`（实盘踩到：realBilling/realBillFile/
-                     * debugLogFile 三个字段漏声明，costkiller_status 直接不可用）。
-                     */
-                    realBilling: {
-                        type: 'object',
-                        properties: {
-                            requests: { type: 'number' },
-                            currency: { type: 'string' },
-                            actualCost: { type: 'number' },
-                            counterfactualCost: { type: 'number' },
-                            savedCost: { type: 'number' },
-                            reduction: { type: 'number' },
-                            cacheHitRate: { type: 'number' },
-                            missTokens: { type: 'number' },
-                            hitTokens: { type: 'number' },
-                            outputTokens: { type: 'number' },
-                            unverifiedOutputTokens: { type: 'number' },
-                            lastPricing: {
-                                type: 'object',
-                                properties: {
-                                    tier: { type: 'string' },
-                                    window: { type: 'string' },
-                                    hit: { type: 'number' },
-                                    miss: { type: 'number' },
-                                    output: { type: 'number' },
-                                },
-                                required: ['tier', 'window', 'hit', 'miss', 'output'],
-                                additionalProperties: false,
-                            },
-                        },
-                        required: [
-                            'requests',
-                            'currency',
-                            'actualCost',
-                            'counterfactualCost',
-                            'savedCost',
-                            'reduction',
-                            'cacheHitRate',
-                            'missTokens',
-                            'hitTokens',
-                            'outputTokens',
-                            'unverifiedOutputTokens',
-                            'lastPricing',
-                        ],
-                        additionalProperties: false,
-                    },
-                    realBillFile: { type: 'string' },
-                    debugLogFile: { type: 'string' },
-                },
-                // 不声明 required：这个 schema 只是自描述文档，一旦字段清单与实际 payload
-                // 漂移，宿主的输出校验就会把整个结果判为非法、退化成空对象（实测踩到）。
-                // 字段漏报的代价（面板没数据）远大于多报（只是文档不全）。
-                required: [
-                    'ok',
-                ],
                 additionalProperties: true,
             },
             render: (value) => [{ type: 'text', text: JSON.stringify(value) }],

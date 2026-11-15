@@ -136,9 +136,10 @@ async function main() {
     });
     /**
      * 回归：工具声明的 output.schema 必须能装下它自己返回的对象。
-     * 宿主按 `additionalProperties: false` 校验返回值，漏声明一个字段整个工具就报
-     * `returned invalid output`（实盘踩到：realBilling/realBillFile/debugLogFile）。
-     * 这里不引 ajv，只按 schema 递归核对：键必须在 properties 里、required 必须给全。
+     * 宿主按 schema 深校验返回值，漏声明一个字段整个工具就会变成空结果
+     * （实盘踩到：realBilling/realBillFile/debugLogFile）。
+     * 这里不引 ajv，只按 schema 递归核对：`additionalProperties: true` 放行未声明键，
+     * 其余情况键必须在 properties 里、required 必须给全。
      */
     await check('status tool output matches its declared schema', async () => {
         const tool = tools.find((item) => item.name === 'costkiller_status');
@@ -149,8 +150,9 @@ async function main() {
             if (schema.type === 'object' || schema.properties) {
                 assert(node && typeof node === 'object', `${path}: expected object`);
                 const declared = schema.properties ?? {};
+                const permissive = schema.additionalProperties === true;
                 for (const key of Object.keys(node)) {
-                    assert(declared[key], `${path}.${key} is not declared (additionalProperties: false)`);
+                    assert(permissive || declared[key], `${path}.${key} is not declared (additionalProperties: false)`);
                 }
                 for (const key of schema.required ?? []) {
                     assert(Object.prototype.hasOwnProperty.call(node, key), `${path}.${key} is required but missing`);

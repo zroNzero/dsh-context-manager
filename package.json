@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-manager",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "description": "dsh-context-manager (CostKillerOrchestrator): cache-aligned context governance for DSH (Admission / Extraction / Memory / CacheAnchor / Routing / SchemaIndex / DedupBus)",
   "license": "MIT",
   "repository": {

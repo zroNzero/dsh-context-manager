@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.4.5 — 修复 `costkiller_status` 恒返回 `{}`（2026-11-15）
+
+现象：`costkiller_status` 每次调用都只拿到 `{}`（日志 `tokensBefore=1`），面板数据还在、工具却读不到。
+
+根因：`output.schema` 里声明的嵌套结构比实际返回的字段窄（`realBilling` / `realBillFile` /
+`debugLogFile` 等未声明）。宿主按 schema 深校验返回值，装不下就把这次调用的结果变成空对象，
+连 `ok` 一起消失。之前只放宽了顶层 `required` 和 `additionalProperties`，嵌套层仍然卡着。
+
+修复：
+- `costkiller_status` 的 `output.schema` 改成纯放行（`type: 'object'` + `additionalProperties: true`，
+  不声明任何 properties）。字段本来就由 `render` 原样吐给模型，声明只是校验负担。
+- `verify` 里的 schema 回归改成按 `additionalProperties` 真实语义判断：为 `true` 时放行未声明键，
+  为 `false` 时仍要求声明齐全——这样它还能守住另外两个严格 schema 的工具。
+
 ## v1.4.4 — 修复「各工作区节省标签同数」（2026-11-15）
 
 现象：面板里合计是对的，但每个工作区的标签全部显示同一个数（当日视图全 `¥0.00`）。
