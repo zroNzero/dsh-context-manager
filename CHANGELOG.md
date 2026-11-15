@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.4.1 — 让 `costkiller_status` 不再整份失效（2026-11-15）
+
+- `costkiller_status` 的输出 schema 由「26 个必填字段 + `additionalProperties: false`」
+  改为**宽松模式**：`required` 只保留 `ok`，允许额外字段。
+  旧写法把「schema 字段清单」和「实际返回的字段」耦合成硬约束，任一侧漂移
+  （我曾因 `lastPricing: null`、历史上有一次因缺 `realBilling`）都会让宿主判定输出非法，
+  工具整份退化成 `{}`，且不报错。现在字段清单仅作文档，不再能让工具无声失效。
+- 修复 `effortEscalateOnError` 默认值（`false → true`）：只升不降是安全方向，
+  出错时抬到 `hard` 不会降低理解力；此前默认关闭导致"升级"从未生效。
+
 ## v1.4.0 — 节省面板与 effort 棘轮修复（2026-11-15）
 
 面板（UI 半 `client.js` + host 路由 `api/dsh-context-manager/summary`）：
